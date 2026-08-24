@@ -264,6 +264,97 @@ def parent_raycast_height_scan(term) -> bool:
     return _sensor_cfg_name(sensor) == "height_scanner"
 
 
+def anymal_parent_body_names(names) -> bool:
+    """True for ANYmal leftovers H1/G1 cannot ``resolve_matching_names``.
+
+    Parent locomotion uses ``body_names="base"``, ``.*THIGH``, ``.*FOOT``.
+    Official H1/G1 retarget those. A Hydra ``from_dict`` leftover crashes
+    Reward/Event/Termination managers at ``gym.make`` — before ``wandb.init``.
+    """
+    if names is None:
+        return False
+    items = list(names) if isinstance(names, (list, tuple)) else [names]
+    for item in items:
+        text = str(item)
+        if text in {"base", ".*FOOT", ".*THIGH", "FOOT", "THIGH"}:
+            return True
+        if text.endswith("FOOT") or text.endswith("THIGH"):
+            return True
+    return False
+
+
+def _term_entity_cfg(term, key: str):
+    if term is None:
+        return None
+    params = getattr(term, "params", None)
+    if params is None:
+        return None
+    if isinstance(params, dict):
+        return params.get(key)
+    return getattr(params, key, None)
+
+
+def _entity_body_names(entity):
+    if entity is None:
+        return None
+    if isinstance(entity, dict):
+        return entity.get("body_names")
+    return getattr(entity, "body_names", None)
+
+
+def _set_entity_body_names(entity, names) -> None:
+    if entity is None:
+        return
+    if isinstance(entity, dict):
+        entity["body_names"] = names
+    elif hasattr(entity, "body_names"):
+        entity.body_names = names
+
+
+def _reassert_anymal_body_names(env_cfg) -> None:
+    """Null or retarget leftover ANYmal base/THIGH/FOOT body filters."""
+    rewards = getattr(env_cfg, "rewards", None)
+    if rewards is not None:
+        if getattr(rewards, "undesired_contacts", None) is not None:
+            print("[WARN] Clearing leftover rewards.undesired_contacts (ANYmal .*THIGH).")
+            rewards.undesired_contacts = None
+        for name in ("feet_air_time", "feet_slide"):
+            term = getattr(rewards, name, None)
+            for key in ("sensor_cfg", "asset_cfg"):
+                entity = _term_entity_cfg(term, key)
+                if anymal_parent_body_names(_entity_body_names(entity)):
+                    print(f"[WARN] Retargeting leftover rewards.{name}.{key} off ANYmal FOOT/base.")
+                    _set_entity_body_names(entity, ".*ankle.*")
+
+    events = getattr(env_cfg, "events", None)
+    if events is not None:
+        ext = getattr(events, "base_external_force_torque", None)
+        if ext is not None and anymal_parent_body_names(
+            _entity_body_names(_term_entity_cfg(ext, "asset_cfg"))
+        ):
+            print("[WARN] Clearing leftover events.base_external_force_torque (ANYmal body 'base').")
+            events.base_external_force_torque = None
+        for name in ("add_base_mass", "base_com"):
+            term = getattr(events, name, None)
+            entity = _term_entity_cfg(term, "asset_cfg")
+            if anymal_parent_body_names(_entity_body_names(entity)):
+                print(f"[WARN] Retargeting leftover events.{name} from 'base' to torso_link.")
+                _set_entity_body_names(entity, "torso_link")
+
+    terms = getattr(env_cfg, "terminations", None)
+    if terms is not None:
+        contact = getattr(terms, "base_contact", None)
+        entity = _term_entity_cfg(contact, "sensor_cfg")
+        if anymal_parent_body_names(_entity_body_names(entity)):
+            scene = getattr(env_cfg, "scene", None)
+            if scene is not None and getattr(scene, "catcher", None) is not None:
+                print("[WARN] Retargeting leftover terminations.base_contact from 'base' to torso_link.")
+                _set_entity_body_names(entity, "torso_link")
+            else:
+                print("[WARN] Clearing leftover terminations.base_contact (ANYmal body 'base').")
+                terms.base_contact = None
+
+
 def _install_task_height_scan(policy) -> None:
     """Swap parent ``mdp.height_scan`` for the dual-terrain task map. Isaac-only."""
     from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -337,6 +428,8 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     mat = getattr(terrain, "physics_material", None) if terrain is not None else None
     if sim is not None and mat is not None:
         sim.physics_material = mat
+
+    _reassert_anymal_body_names(env_cfg)
 
 
 def _none_safe_update_class_from_dict(orig):

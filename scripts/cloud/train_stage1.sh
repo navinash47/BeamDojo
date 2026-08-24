@@ -17,6 +17,17 @@ if [[ -n "${WANDB_API_KEY:-}" ]]; then
 else
   echo "WANDB_API_KEY unset; TensorBoard only. ssh -L 6006:localhost:6006 lambda-beamdojo"
 fi
+python3 -c "
+import beamdojo_runtime
+beamdojo_runtime.write_boot_status(
+    stage=1,
+    robot='${ROBOT}',
+    terrain='beam',
+    num_envs=int('${NUM_ENVS}'),
+    max_iterations=int('${MAX_ITERS}'),
+    note='train_stage1.sh: launching isaaclab.sh. Not a live W&B run yet.',
+)
+"
 exec /workspace/isaaclab/isaaclab.sh -p train_beamdojo.py \
   --headless \
   --device cuda:0 \

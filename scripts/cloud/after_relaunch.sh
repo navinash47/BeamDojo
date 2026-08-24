@@ -63,6 +63,10 @@ if ! grep -q "def clear_stale_distributed_env" "$REPO/scripts/rsl_rl/beamdojo_ru
   echo "beamdojo_runtime.py is missing leftover WORLD_SIZE clear. Pull ${REF} or rsl-rl NCCL-inits before wandb.init." >&2
   exit 1
 fi
+if ! grep -q "def anymal_parent_body_names" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing ANYmal body-name reassert. Pull ${REF} or leftover body=base / .*THIGH crashes gym.make." >&2
+  exit 1
+fi
 if ! grep -q "def apply_physx_gpu_capacity" "$REPO/h1_cfg/beamdojo_common.py"; then
   echo "beamdojo_common.py is missing PhysX GPU buffer bump. Pull ${REF} or cloned beams/stones overflow contact buffers." >&2
   exit 1

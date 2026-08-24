@@ -885,6 +885,65 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertEqual(called, [cfg.observations.policy])
         self.assertEqual(cfg.observations.policy.height_scan, "task")
 
+    def test_anymal_parent_body_names(self):
+        self.assertTrue(self.rt.anymal_parent_body_names("base"))
+        self.assertTrue(self.rt.anymal_parent_body_names(".*THIGH"))
+        self.assertTrue(self.rt.anymal_parent_body_names([".*FOOT"]))
+        self.assertFalse(self.rt.anymal_parent_body_names("torso_link"))
+        self.assertFalse(self.rt.anymal_parent_body_names(".*_ankle_link"))
+        self.assertFalse(self.rt.anymal_parent_body_names(None))
+
+    def test_reassert_clears_anymal_base_thigh_foot(self):
+        sensor = type("S", (), {"body_names": ".*FOOT"})()
+        asset = type("A", (), {"body_names": "base"})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "rewards": type(
+                    "Rew",
+                    (),
+                    {
+                        "undesired_contacts": object(),
+                        "feet_air_time": type("T", (), {"params": {"sensor_cfg": sensor}})(),
+                        "feet_slide": type("T", (), {"params": {"sensor_cfg": sensor, "asset_cfg": None}})(),
+                    },
+                )(),
+                "events": type(
+                    "Ev",
+                    (),
+                    {
+                        "base_external_force_torque": type("T", (), {"params": {"asset_cfg": asset}})(),
+                        "add_base_mass": type(
+                            "T", (), {"params": {"asset_cfg": type("A", (), {"body_names": "base"})()}}
+                        )(),
+                        "base_com": None,
+                    },
+                )(),
+                "terminations": type(
+                    "Term",
+                    (),
+                    {
+                        "base_contact": type(
+                            "T",
+                            (),
+                            {"params": {"sensor_cfg": type("S", (), {"body_names": "base"})()}},
+                        )()
+                    },
+                )(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNone(cfg.rewards.undesired_contacts)
+        self.assertEqual(sensor.body_names, ".*ankle.*")
+        self.assertIsNone(cfg.events.base_external_force_torque)
+        self.assertEqual(cfg.events.add_base_mass.params["asset_cfg"].body_names, "torso_link")
+        self.assertIsNone(cfg.terminations.base_contact)
+
     def test_none_safe_from_dict_skips_none_target(self):
         seen = []
 
@@ -957,6 +1016,7 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("beamdojo_runtime.runner_cfg_dict(agent_cfg)", train)
         self.assertNotIn("OnPolicyRunner(env, agent_cfg.to_dict()", train)
         self.assertNotIn("OnPolicyRunner(env, agent_cfg.to_dict()", play)
+        stage1 = (root / "scripts" / "cloud" / "train_stage1.sh").read_text()
         stage2 = (root / "scripts" / "cloud" / "train_stage2.sh").read_text()
         self.assertIn("beamdojo_${ROBOT}_stage1", stage2)
         self.assertNotIn("model_9999.pt", stage2)
@@ -973,6 +1033,9 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("_patch_wandb_init_retry", relaunch)
         self.assertIn("write_boot_status", relaunch)
         self.assertIn("clear_stale_distributed_env", relaunch)
+        self.assertIn("anymal_parent_body_names", relaunch)
+        self.assertIn("write_boot_status", stage1)
+        self.assertIn("write_boot_status", stage2)
         self.assertIn('checkout -f -B "$REF" "origin/${REF}"', relaunch)
         self.assertIn("Never git clean", relaunch)
         self.assertNotIn("git clean", relaunch.replace("Never git clean", ""))

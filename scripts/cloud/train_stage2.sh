@@ -34,6 +34,17 @@ if [[ -n "${LOAD_EXPERIMENT:-}" ]]; then
   LOAD_EXP_ARGS=(--load_experiment "$LOAD_EXPERIMENT")
 fi
 echo "Stage 2 resume: latest Stage 1 checkpoint under logs/rsl_rl/beamdojo_${ROBOT}_stage1 unless LOAD_RUN/CHECKPOINT/LOAD_EXPERIMENT are set."
+python3 -c "
+import beamdojo_runtime
+beamdojo_runtime.write_boot_status(
+    stage=2,
+    robot='${ROBOT}',
+    terrain='${TERRAIN}',
+    num_envs=int('${NUM_ENVS}'),
+    max_iterations=int('${MAX_ITERS}'),
+    note='train_stage2.sh: launching isaaclab.sh. Not a live W&B run yet.',
+)
+"
 exec /workspace/isaaclab/isaaclab.sh -p train_beamdojo.py \
   --headless \
   --device cuda:0 \
