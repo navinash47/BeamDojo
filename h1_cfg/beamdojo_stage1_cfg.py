@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 from isaaclab.utils import configclass
-from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import (
-    LocomotionVelocityRoughEnvCfg,
-)
 
 from h1_cfg.beamdojo_common import apply_play, apply_stage1
+from h1_cfg.beamdojo_env_base import BeamDojoEnvCfg
 from h1_cfg.robot_spec import H1
 
 import gymnasium as gym
 
 
 @configclass
-class BeamDojoStage1EnvCfg(LocomotionVelocityRoughEnvCfg):
+class BeamDojoStage1EnvCfg(BeamDojoEnvCfg):
     """Walk on a plane; scan/reward against an imagined 20 cm beam. Timeout-only."""
 
     def __post_init__(self):

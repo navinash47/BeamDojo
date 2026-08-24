@@ -18,6 +18,7 @@ BEAM_CENTER_Z = 0.24
 CATCHER_Z = -0.90
 CATCHER_THICKNESS = 0.10
 CATCHER_SIZE_XY = 400.0
+STONE_COUNT = 24
 
 
 def task_beam_cfg(
@@ -69,7 +70,7 @@ def stone_cfg(
     )
 
 
-def add_stepping_stones(scene, count: int = 24, collision: bool = True) -> None:
+def add_stepping_stones(scene, count: int = STONE_COUNT, collision: bool = True) -> None:
     for i in range(count):
         setattr(scene, f"task_stone_{i}", stone_cfg(i, collision=collision))
 

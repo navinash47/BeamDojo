@@ -8,7 +8,7 @@ Isaac Lab / Isaac Sim port of [BeamDojo (RSS 2025)](https://why618188.github.io/
 
 - Dual-terrain Stage 1: flat PhysX + imagined beam heightfield (15×15 yaw scan, 15 foot-frame samples, timeout-only)
 - Stage 2: colliding beam or stepping stones, fall / off-terrain terminate, width curriculum
-- Unitree G1 (`G1_MINIMAL_CFG`), 12 lower-body actions, double-critic PPO (`w1=1.0`, `w2=0.25`, MLP `[512, 216, 128]`)
+- Unitree H1 / G1 (`H1_MINIMAL_CFG` / `G1_MINIMAL_CFG`), 12 lower-body G1 actions, double-critic PPO (`w1=1.0`, `w2=0.25`, MLP `[512, 216, 128]`)
 - W&B / TensorBoard logging; checkpoints on Lambda NFS
 
 ## Live metrics (webpage)

@@ -22,6 +22,7 @@
 - Stage 2 disables `/World/ground` collision and drops onto a world catcher at z=−0.90 (below the 0.40 m height done) so the robot cannot walk beside the beam on the importer plane.
 - Double critic: `ActorCriticDouble` + `PPODoubleCritic` (w1=1.0, w2=0.25), MLP `[512, 216, 128]`, injected into rsl-rl 3.0.1. Foothold GAE uses the same timeout bootstrap as rsl-rl (`R += γV·timeout`) so Stage 1 (timeout-only) does not treat every episode end as a true terminal for critic 2.
 - Table IX / appendix VI-C: payload ±2 kg, CoM ±5 cm, friction 0.4–1.0, obs noise, elevation yaw/tilt/dilate/repeat. Play configs still disable DR. Payload/CoM DR targets `spec.torso_body` (`torso_link` on H1 and G1).
-- Table IX / appendix VI-C: payload ±2 kg, CoM ±5 cm, friction 0.4–1.0, obs noise, elevation yaw/tilt/dilate/repeat. Play configs still disable DR.
-- G1 uses `G1_MINIMAL_CFG`, feet `.*_ankle_roll_link`, 12 lower-body actions. Do not claim paper numbers until a real G1 train finishes.
+- G1 uses `G1_MINIMAL_CFG`, feet `.*_ankle_roll_link`, 12 lower-body actions. Official G1 finger deviation + hip/knee acc / hip-knee-ankle torque filters are on. Do not claim paper numbers until a real G1 train finishes.
+- H1 locomotion spawn is `H1_MINIMAL_CFG` (same kinematics, fewer collision meshes) so 1024 envs can fit an A10. Env classes inherit `BeamDojoEnvCfg` so Hydra keeps foothold / beam / stones / G1 extras.
+- Stage 2 reset pose stays on the beam (y ±8 cm, small yaw); root velocity and joint-scale randomization match official H1/G1 (zero twist, identity joint scale).
 - **Do not git-commit checkpoints or weights.**

@@ -28,21 +28,35 @@ from h1_cfg.scene_props import (
     BEAM_THICKNESS,
     BEAM_WIDTH_EASY,
     BEAM_WIDTH_HARD,
+    STONE_COUNT,
     add_stepping_stones,
     catcher_cfg,
     task_beam_cfg,
 )
 
+# Official Isaac Lab 2.3.2 G1 locomotion (finger joints still present on G1_MINIMAL_CFG).
+G1_FINGER_JOINTS = [
+    ".*_five_joint",
+    ".*_three_joint",
+    ".*_six_joint",
+    ".*_four_joint",
+    ".*_zero_joint",
+    ".*_one_joint",
+    ".*_two_joint",
+]
+
 
 def spawn_robot(cfg, spec: RobotSpec) -> None:
+    """Spawn the official *minimal* USD (fewer collision meshes; A10 1024-env fit)."""
     if spec.name == "g1":
-        from isaaclab_assets.robots.unitree import G1_MINIMAL_CFG
-
-        cfg.scene.robot = G1_MINIMAL_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        from isaaclab_assets.robots.unitree import G1_MINIMAL_CFG as ROBOT_CFG
     else:
-        from isaaclab_assets.robots.unitree import H1_CFG as UNITREE_H1_CFG
+        try:
+            from isaaclab_assets.robots.unitree import H1_MINIMAL_CFG as ROBOT_CFG
+        except ImportError:
+            from isaaclab_assets.robots.unitree import H1_CFG as ROBOT_CFG
 
-        cfg.scene.robot = UNITREE_H1_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+    cfg.scene.robot = ROBOT_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
     beam_top = BEAM_CENTER_Z + BEAM_THICKNESS * 0.5
     cfg.scene.robot.init_state.pos = (0.0, 0.0, spec.pelvis_z + beam_top)
 
@@ -79,6 +93,10 @@ def apply_sensors(cfg, spec: RobotSpec) -> None:
         track_air_time=True,
         update_period=0.0,
     )
+    dt = float(getattr(cfg.sim, "dt", 0.005) or 0.005)
+    dec = int(getattr(cfg, "decimation", 4) or 4)
+    cfg.scene.height_scanner.update_period = dec * dt
+    cfg.scene.contact_forces.update_period = dt
 
 
 def apply_paper_dr(cfg, spec: RobotSpec) -> None:
@@ -118,8 +136,24 @@ def apply_paper_dr(cfg, spec: RobotSpec) -> None:
             term.noise = Unoise(n_min=lo, n_max=hi)
 
 
+def _zero_root_reset_velocity(cfg) -> None:
+    """Official H1/G1 locomotion: zero root twist at reset (parent ANYmal is ±0.5)."""
+    reset_base = getattr(cfg.events, "reset_base", None)
+    if reset_base is None:
+        return
+    velocity_range = dict(reset_base.params.get("velocity_range") or {})
+    for key in ("x", "y", "z", "roll", "pitch", "yaw"):
+        velocity_range[key] = (0.0, 0.0)
+    reset_base.params["velocity_range"] = velocity_range
+
+
 def apply_shared_locomotion(cfg, spec: RobotSpec, *, stage: int) -> None:
     apply_paper_dr(cfg, spec)
+
+    # Official H1/G1: identity joint scale at reset (parent ANYmal is 0.5–1.5).
+    if getattr(cfg.events, "reset_robot_joints", None) is not None:
+        cfg.events.reset_robot_joints.params["position_range"] = (1.0, 1.0)
+    _zero_root_reset_velocity(cfg)
 
     cfg.rewards.lin_vel_z_l2.weight = -2.0 if spec.name == "h1" else 0.0
     cfg.rewards.ang_vel_xy_l2.weight = -0.05
@@ -192,6 +226,29 @@ def apply_shared_locomotion(cfg, spec: RobotSpec, *, stage: int) -> None:
             "depth_threshold": -0.1,
         },
     )
+    if spec.name == "g1":
+        cfg.rewards.feet_slide.weight = -0.1
+        cfg.rewards.track_ang_vel_z_exp.weight = 2.0
+        cfg.rewards.dof_torques_l2.weight = -1.5e-7
+        acc = cfg.rewards.dof_acc_l2
+        if acc is not None:
+            if not acc.params:
+                acc.params = {}
+            acc.params["asset_cfg"] = SceneEntityCfg(
+                "robot", joint_names=[".*_hip_.*", ".*_knee_joint"]
+            )
+        torque = cfg.rewards.dof_torques_l2
+        if torque is not None:
+            if not torque.params:
+                torque.params = {}
+            torque.params["asset_cfg"] = SceneEntityCfg(
+                "robot", joint_names=[".*_hip_.*", ".*_knee_joint", ".*_ankle_.*"]
+            )
+        cfg.rewards.joint_deviation_fingers = RewTerm(
+            func=mdp.joint_deviation_l1,
+            weight=-0.05,
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=G1_FINGER_JOINTS)},
+        )
 
     cfg.observations.policy.base_lin_vel.scale = 2.0
     cfg.observations.policy.base_ang_vel.scale = 0.25
@@ -255,7 +312,7 @@ def apply_stage2(cfg, spec: RobotSpec = H1, *, stones: bool = False) -> None:
     apply_sensors(cfg, spec)
     if stones:
         cfg.scene.task_beam = None
-        add_stepping_stones(cfg.scene, count=24, collision=True)
+        add_stepping_stones(cfg.scene, count=STONE_COUNT, collision=True)
         terrain = "stones"
         start_w = 0.20
     else:
@@ -272,6 +329,12 @@ def apply_stage2(cfg, spec: RobotSpec = H1, *, stones: bool = False) -> None:
         mode="startup",
         params={"prim_paths": ("/World/ground", "/World/defaultGroundPlane")},
     )
+    # Spawn on the beam, not on the collision-disabled plane beside it.
+    pose_range = dict(cfg.events.reset_base.params.get("pose_range") or {})
+    pose_range["x"] = (-0.2, 0.5)
+    pose_range["y"] = (-0.08, 0.08)
+    pose_range["yaw"] = (-0.3, 0.3)
+    cfg.events.reset_base.params["pose_range"] = pose_range
 
     cfg.terminations.time_out = DoneTerm(func=mdp.time_out, time_out=True)
     cfg.terminations.base_height = DoneTerm(
@@ -317,12 +380,9 @@ def apply_play(cfg) -> None:
     cfg.events.base_com = None
     cfg.events.push_robot = None
     cfg.events.base_external_force_torque = None
-    pose_range = cfg.events.reset_base.params.get("pose_range", {})
+    pose_range = dict(cfg.events.reset_base.params.get("pose_range") or {})
     pose_range["x"] = (-0.2, 0.2)
     pose_range["y"] = (-0.08, 0.08)
     pose_range["yaw"] = (-0.2, 0.2)
     cfg.events.reset_base.params["pose_range"] = pose_range
-    velocity_range = cfg.events.reset_base.params.get("velocity_range", {})
-    for key in ("x", "y", "z", "roll", "pitch", "yaw"):
-        velocity_range[key] = (0.0, 0.0)
-    cfg.events.reset_base.params["velocity_range"] = velocity_range
+    _zero_root_reset_velocity(cfg)

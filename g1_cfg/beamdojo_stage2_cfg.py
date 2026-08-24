@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 from isaaclab.utils import configclass
-from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import (
-    LocomotionVelocityRoughEnvCfg,
-)
 
 from h1_cfg.beamdojo_common import apply_play, apply_stage2
+from h1_cfg.beamdojo_env_base import BeamDojoEnvCfg
 from h1_cfg.robot_spec import G1
 
 import gymnasium as gym
 
 
 @configclass
-class BeamDojoStage2G1EnvCfg(LocomotionVelocityRoughEnvCfg):
+class BeamDojoStage2G1EnvCfg(BeamDojoEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         apply_stage2(self, G1, stones=False)
@@ -49,7 +47,7 @@ gym.register(
 
 
 @configclass
-class BeamDojoStage2G1StonesEnvCfg(LocomotionVelocityRoughEnvCfg):
+class BeamDojoStage2G1StonesEnvCfg(BeamDojoEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         apply_stage2(self, G1, stones=True)
