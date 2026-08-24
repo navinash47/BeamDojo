@@ -8,13 +8,12 @@ BeamDojo Stage 1 curriculum (flat terrain with imagined beam constraints).
 from __future__ import annotations
 
 import argparse
-import importlib
-import importlib.util
 import sys
 
 from isaaclab.app import AppLauncher
 
 # local imports
+import beamdojo_runtime  # isort: skip
 import cli_args  # isort: skip
 
 
@@ -23,27 +22,6 @@ STAGE1_TASK_ID = "Isaac-BeamDojo-Stage1-H1-v0"
 STAGE1_DEFAULT_EXPERIMENT = "beamdojo_stage1"
 STAGE1_DEFAULT_SAVE_INTERVAL = 100
 STAGE1_DEFAULT_MAX_ITERS = 10_000
-
-
-def _ensure_beamdojo_stage1_registered():
-    """Import BeamDojo Stage 1 task ensuring `agents` module is seeded before registration."""
-    module_name = "isaaclab_tasks.manager_based.locomotion.velocity.config.h1.beamdojo_stage1_cfg"
-    if module_name in sys.modules:
-        return
-
-    spec = importlib.util.find_spec(module_name)
-    if spec is None or spec.loader is None:
-        raise ImportError(
-            "Cannot locate BeamDojo Stage 1 config module. "
-            "Please verify that the file exists and is discoverable by Python."
-        )
-
-    module = importlib.util.module_from_spec(spec)
-    module.__dict__["agents"] = importlib.import_module(
-        "isaaclab_tasks.manager_based.locomotion.velocity.config.h1.agents"
-    )
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
 
 
 # -- CLI -------------------------------------------------------------------------------------------------------------
@@ -58,7 +36,7 @@ parser.add_argument(
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_interval", type=int, default=2000, help="Interval between video recordings (in steps).")
-parser.add_argument("--num_envs", type=int, default=4096, help="Number of environments to simulate.")
+parser.add_argument("--num_envs", type=int, default=1024, help="Number of environments to simulate.")
 parser.add_argument(
     "--task",
     type=str,
@@ -88,6 +66,7 @@ cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
+beamdojo_runtime.require_gpu_device(getattr(args_cli, "device", None))
 
 if args_cli.stage != 1:
     raise ValueError("train_beamdojo.py currently only supports Stage 1 training.")
@@ -107,7 +86,7 @@ simulation_app = app_launcher.app
 import isaaclab  # noqa: F401
 
 # ensure BeamDojo Stage 1 environment is registered (requires SimulationApp to be live)
-_ensure_beamdojo_stage1_registered()
+beamdojo_runtime.ensure_beamdojo_stage1_registered()
 
 
 # -- Sanity check RSL-RL version -------------------------------------------------------------------------------------
@@ -138,6 +117,8 @@ from datetime import datetime
 
 import gymnasium as gym
 import torch
+
+beamdojo_runtime.require_cuda()
 
 import omni
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
@@ -229,9 +210,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.seed = seed
         agent_cfg.seed = seed
 
-    # specify directory for logging experiments
-    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
-    log_root_path = os.path.abspath(log_root_path)
+    # specify directory for logging experiments (Lambda NFS when mounted)
+    log_root_path = beamdojo_runtime.resolve_log_root(agent_cfg.experiment_name)
     print("=" * 80)
     print("BeamDojo Stage 1 Training")
     print("=" * 80)

@@ -1,0 +1,16 @@
+# Extra binds for BeamDojo code and NFS logs. Merged via:
+#   ./docker/container.py start --files /lambda/nfs/beamdojo/src/BeamDojo/scripts/cloud/docker-compose.beamdojo.yaml
+services:
+  isaac-lab-base:
+    volumes:
+      - type: bind
+        source: /lambda/nfs/beamdojo/src/BeamDojo
+        target: /workspace/beamdojo
+      - type: bind
+        source: /lambda/nfs/beamdojo/logs
+        target: /workspace/isaaclab/logs
+    environment:
+      - BEAMDOJO_LOG_ROOT=/workspace/isaaclab/logs
+      # Lambda Stack ships a headless driver. After installing
+      # libnvidia-gl-580-server on the host, these caps inject Vulkan/GL.
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display,video

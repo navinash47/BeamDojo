@@ -8,39 +8,17 @@ Stage 1 environment is registered before use.
 from __future__ import annotations
 
 import argparse
-import importlib
-import importlib.util
 import sys
 
 from isaaclab.app import AppLauncher
 
 # local imports
+import beamdojo_runtime  # isort: skip
 import cli_args  # isort: skip
 
 # -- Constants -------------------------------------------------------------------------------------------------------
 STAGE1_TASK_ID = "Isaac-BeamDojo-Stage1-H1-v0"
 STAGE1_PLAY_TASK_ID = "Isaac-BeamDojo-Stage1-H1-Play-v0"
-
-
-def _ensure_beamdojo_stage1_registered():
-    """Import BeamDojo Stage 1 task ensuring `agents` module is seeded before registration."""
-    module_name = "isaaclab_tasks.manager_based.locomotion.velocity.config.h1.beamdojo_stage1_cfg"
-    if module_name in sys.modules:
-        return
-
-    spec = importlib.util.find_spec(module_name)
-    if spec is None or spec.loader is None:
-        raise ImportError(
-            "Cannot locate BeamDojo Stage 1 config module. "
-            "Please verify that the file exists and is discoverable by Python."
-        )
-
-    module = importlib.util.module_from_spec(spec)
-    module.__dict__["agents"] = importlib.import_module(
-        "isaaclab_tasks.manager_based.locomotion.velocity.config.h1.agents"
-    )
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
 
 
 # -- CLI -------------------------------------------------------------------------------------------------------------
@@ -81,6 +59,8 @@ AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
 
+beamdojo_runtime.require_gpu_device(getattr(args_cli, "device", None))
+
 if args_cli.stage != 1:
     raise ValueError("play_beamdojo.py currently only supports Stage 1 training.")
 
@@ -99,7 +79,7 @@ simulation_app = app_launcher.app
 import isaaclab  # noqa: F401
 
 # ensure BeamDojo Stage 1 environment is registered (requires SimulationApp to be live)
-_ensure_beamdojo_stage1_registered()
+beamdojo_runtime.ensure_beamdojo_stage1_registered()
 
 """Rest everything follows."""
 
@@ -107,6 +87,8 @@ import gymnasium as gym
 import os
 import time
 import torch
+
+beamdojo_runtime.require_cuda()
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
@@ -119,7 +101,7 @@ from isaaclab.envs import (
 )
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
+from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
 
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx
 
@@ -146,9 +128,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
-    # specify directory for logging experiments
-    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
-    log_root_path = os.path.abspath(log_root_path)
+    if not getattr(agent_cfg, "experiment_name", None) or agent_cfg.experiment_name == "h1_rough":
+        agent_cfg.experiment_name = "beamdojo_stage1"
+
+    # specify directory for logging experiments (Lambda NFS when mounted)
+    log_root_path = beamdojo_runtime.resolve_log_root(agent_cfg.experiment_name)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
     if args_cli.use_pretrained_checkpoint:
         resume_path = get_published_pretrained_checkpoint("rsl_rl", train_task_name)

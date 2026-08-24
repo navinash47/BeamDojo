@@ -332,63 +332,53 @@ def foothold_reward_stage1(
     Returns:
         Foothold reward tensor [num_envs]
     """
-    import torch  # noqa: F401
-    
-    # Get contact sensor
+    import torch
+    from isaaclab.utils.math import quat_apply
+
     contact_sensor = env.scene.sensors[sensor_cfg.name]
     robot = env.scene["robot"]
 
-    # Find foot bodies on the sensor and the robot
     foot_sensor_indices, foot_names = contact_sensor.find_bodies(sensor_cfg.body_names, preserve_order=True)
     foot_robot_indices, _ = robot.find_bodies(foot_names, preserve_order=True)
 
-    # Get foot positions in world frame
-    foot_positions_w = robot.data.body_pos_w[:, foot_robot_indices, :]  # [num_envs, n_feet, 3]
+    foot_positions_w = robot.data.body_pos_w[:, foot_robot_indices, :]
+    foot_quat_w = robot.data.body_quat_w[:, foot_robot_indices, :]
+    env_xy = env.scene.env_origins[:, :2]
 
-    # Get contact forces to determine if foot is touching ground
-    contact_forces = contact_sensor.data.net_forces_w[:, foot_sensor_indices, 2]  # Z-component
-    in_contact = torch.abs(contact_forces) > 1.0  # [num_envs, 2]
-    
-    # Sample points under each foot (simplified grid sampling)
-    # For proper implementation, sample in foot frame and transform to world
-    foot_length = 0.15  # Approximate H1 foot length
-    foot_width = 0.08   # Approximate H1 foot width
-    
-    # Create sample grid
-    sqrt_n = int(math.sqrt(num_samples))
-    x_offsets = torch.linspace(-foot_length/2, foot_length/2, sqrt_n, device=env.device)
-    y_offsets = torch.linspace(-foot_width/2, foot_width/2, sqrt_n, device=env.device)
-    
-    # Initialize penalty
+    contact_forces = contact_sensor.data.net_forces_w[:, foot_sensor_indices, 2]
+    in_contact = torch.abs(contact_forces) > 1.0
+
+    # H1 foot print; 5x3 = 15 samples matching the paper default.
+    foot_length = 0.15
+    foot_width = 0.08
+    n_x, n_y = 5, 3
+    x_offsets = torch.linspace(-foot_length / 2, foot_length / 2, n_x, device=env.device)
+    y_offsets = torch.linspace(-foot_width / 2, foot_width / 2, n_y, device=env.device)
+    xx, yy = torch.meshgrid(x_offsets, y_offsets, indexing="ij")
+    local = torch.stack(
+        [xx.reshape(-1), yy.reshape(-1), torch.zeros(n_x * n_y, device=env.device)],
+        dim=-1,
+    )
+
+    y_min = target_beam_y_center - target_beam_width / 2
+    y_max = target_beam_y_center + target_beam_width / 2
     penalty = torch.zeros(env.num_envs, device=env.device)
-    
-    # For each foot
+
     num_feet = foot_positions_w.shape[1]
+    n_samples = local.shape[0]
     for foot_idx in range(num_feet):
-        # Get foot XY position
-        foot_xy = foot_positions_w[:, foot_idx, :2]  # [num_envs, 2]
-        
-        # Count samples off the target beam
-        # Beam is centered at y=target_beam_y_center, width=target_beam_width
-        # Beam extends along X axis for target_beam_length
-        
-        # Check if foot Y position is outside beam width
-        foot_y = foot_xy[:, 1]
-        y_min = target_beam_y_center - target_beam_width / 2
-        y_max = target_beam_y_center + target_beam_width / 2
-        
-        # Simplified: check if center of foot is off beam
-        # For full implementation, check all sample points
-        off_beam = (foot_y < y_min) | (foot_y > y_max)
-        
-        # Also check if beyond beam length
-        foot_x = foot_xy[:, 0]
-        off_beam = off_beam | (foot_x < 0.0) | (foot_x > target_beam_length)
-        
-        # Apply penalty only when in contact
-        penalty += in_contact[:, foot_idx].float() * off_beam.float() * num_samples
-    
-    # Return negative penalty as reward
+        quat = foot_quat_w[:, foot_idx].unsqueeze(1).expand(-1, n_samples, -1)
+        pts_w = quat_apply(quat, local.unsqueeze(0).expand(env.num_envs, -1, -1))
+        pts_w = pts_w + foot_positions_w[:, foot_idx].unsqueeze(1)
+        pts_env = pts_w[..., :2] - env_xy.unsqueeze(1)
+        off_beam = (
+            (pts_env[..., 1] < y_min)
+            | (pts_env[..., 1] > y_max)
+            | (pts_env[..., 0] < 0.0)
+            | (pts_env[..., 0] > target_beam_length)
+        )
+        penalty = penalty + in_contact[:, foot_idx].float() * off_beam.float().sum(dim=-1)
+
     return -penalty
 
 

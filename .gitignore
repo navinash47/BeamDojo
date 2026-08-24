@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+!.env.lambda.example
+scripts/cloud/lambda.host.env
+*.pem
+*.ppk
+logs/
+videos/
+wandb/
+__pycache__/
+*.pyc
+.DS_Store
