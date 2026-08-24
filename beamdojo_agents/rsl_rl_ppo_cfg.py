@@ -54,3 +54,10 @@ class BeamDojoG1PPORunnerCfg(BeamDojoPPORunnerCfg):
         super().__post_init__()
         self.experiment_name = "beamdojo_g1_stage1"
         self.algorithm.entropy_coef = 0.008
+
+
+@configclass
+class BeamDojoG1Stage2PPORunnerCfg(BeamDojoG1PPORunnerCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "beamdojo_g1_stage2"

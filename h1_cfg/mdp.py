@@ -17,6 +17,7 @@ from beamdojo_mdp.heightfield import (
     yaw_from_quat_wxyz,
     yaw_grid_xy,
 )
+from beamdojo_mdp.elevation_noise import dilate_on_cells, maybe_repeat_map, tilt_height_grid
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -52,6 +53,11 @@ def init_beamdojo_state(
     env.beamdojo_scan_noise_std = float(scan_noise_std)
     env.beamdojo_foothold_step = torch.zeros(n, device=dev)
     env.beamdojo_width0 = float(width)
+    env.beamdojo_map_yaw = torch.zeros(n, device=dev)
+    env.beamdojo_map_hx = torch.zeros(n, device=dev)
+    env.beamdojo_map_hy = torch.zeros(n, device=dev)
+    env.beamdojo_extend = torch.zeros(n, dtype=torch.bool, device=dev)
+    env.beamdojo_last_scan = None
 
 
 def reset_beamdojo_noise(
@@ -67,6 +73,16 @@ def reset_beamdojo_noise(
     n = env.num_envs if env_ids is None else len(env_ids)
     env.beamdojo_z_bias = getattr(env, "beamdojo_z_bias", torch.zeros(env.num_envs, device=env.device))
     env.beamdojo_z_bias[ids] = vertical_bias_std * torch.randn(n, device=env.device)
+    env.beamdojo_map_yaw = getattr(env, "beamdojo_map_yaw", torch.zeros(env.num_envs, device=env.device))
+    env.beamdojo_map_hx = getattr(env, "beamdojo_map_hx", torch.zeros(env.num_envs, device=env.device))
+    env.beamdojo_map_hy = getattr(env, "beamdojo_map_hy", torch.zeros(env.num_envs, device=env.device))
+    env.beamdojo_extend = getattr(
+        env, "beamdojo_extend", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    )
+    env.beamdojo_map_yaw[ids] = 0.2 * (2.0 * torch.rand(n, device=env.device) - 1.0)
+    env.beamdojo_map_hx[ids] = 0.03 * (2.0 * torch.rand(n, device=env.device) - 1.0)
+    env.beamdojo_map_hy[ids] = 0.03 * (2.0 * torch.rand(n, device=env.device) - 1.0)
+    env.beamdojo_extend[ids] = torch.rand(n, device=env.device) < 0.6
 
 
 def _origins(env):
@@ -137,12 +153,36 @@ def task_height_scan(
     robot = env.scene["robot"]
     pos = robot.data.root_pos_w
     yaw = yaw_from_quat_wxyz(robot.data.root_quat_w)
+    corrupt = bool(
+        getattr(env, "cfg", None) and getattr(env.cfg.observations.policy, "enable_corruption", True)
+    )
+    if corrupt and hasattr(env, "beamdojo_map_yaw"):
+        yaw = yaw + env.beamdojo_map_yaw
     gx, gy = yaw_grid_xy(pos[:, 0], pos[:, 1], yaw, n=grid_n, extent=extent)
     hz = task_height_at_xy(env, gx, gy)
+    if corrupt:
+        hx = getattr(env, "beamdojo_map_hx", None)
+        hy = getattr(env, "beamdojo_map_hy", None)
+        if hx is not None and hy is not None:
+            hz = tilt_height_grid(hz, grid_n, hx, hy)
+        extend = getattr(env, "beamdojo_extend", None)
+        if extend is not None:
+            hz = dilate_on_cells(
+                hz,
+                grid_n,
+                on_z=float(getattr(env, "beamdojo_on_z", BEAM_ON_Z)),
+                off_z=float(getattr(env, "beamdojo_off_z", BEAM_OFF_Z)),
+                extend=extend,
+            )
     scan = (pos[:, 2].unsqueeze(-1) - hz) - offset
     std = float(getattr(env, "beamdojo_scan_noise_std", 0.0) or 0.0)
-    if std > 0 and bool(getattr(env, "cfg", None) and getattr(env.cfg.observations.policy, "enable_corruption", True)):
+    if std > 0 and corrupt:
         scan = scan + std * torch.randn_like(scan)
+    last = getattr(env, "beamdojo_last_scan", None)
+    if corrupt and last is not None and last.shape == scan.shape:
+        repeat = torch.rand(env.num_envs, device=env.device) < 0.2
+        scan = maybe_repeat_map(scan, last, repeat)
+    env.beamdojo_last_scan = scan.detach()
     return scan
 
 

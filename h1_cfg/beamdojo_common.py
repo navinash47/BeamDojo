@@ -16,6 +16,8 @@ from isaaclab.managers import (
 from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.terrains import TerrainImporterCfg
 
+from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
+
 import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
 
 from h1_cfg import mdp as bd_mdp
@@ -79,11 +81,46 @@ def apply_sensors(cfg, spec: RobotSpec) -> None:
     )
 
 
-def apply_shared_locomotion(cfg, spec: RobotSpec, *, stage: int) -> None:
-    cfg.events.add_base_mass = None
-    cfg.events.base_com = None
+def apply_paper_dr(cfg, spec: RobotSpec) -> None:
+    """Appendix VI-C / Table IX. Update existing Isaac Lab terms; skip missing names."""
+    torso = ".*torso_link"
+    if getattr(cfg.events, "add_base_mass", None) is not None:
+        cfg.events.add_base_mass.params["mass_distribution_params"] = (-2.0, 2.0)
+        cfg.events.add_base_mass.params["asset_cfg"] = SceneEntityCfg("robot", body_names=torso)
+    if getattr(cfg.events, "base_com", None) is not None:
+        cfg.events.base_com.params["com_range"] = {
+            "x": (-0.05, 0.05),
+            "y": (-0.05, 0.05),
+            "z": (-0.05, 0.05),
+        }
+        cfg.events.base_com.params["asset_cfg"] = SceneEntityCfg("robot", body_names=torso)
+    # Interval pushes are eval-only in the paper, not Table IX training DR.
     cfg.events.push_robot = None
     cfg.events.base_external_force_torque = None
+    if getattr(cfg.events, "physics_material", None) is not None:
+        cfg.events.physics_material.params["static_friction_range"] = (0.4, 1.0)
+        cfg.events.physics_material.params["dynamic_friction_range"] = (0.4, 1.0)
+        cfg.events.physics_material.params["restitution_range"] = (0.0, 1.0)
+    if getattr(cfg.events, "actuator_gains", None) is not None:
+        cfg.events.actuator_gains.params["stiffness_distribution_params"] = (0.85, 1.15)
+        cfg.events.actuator_gains.params["damping_distribution_params"] = (0.85, 1.15)
+        cfg.events.actuator_gains.params["operation"] = "scale"
+
+    policy = cfg.observations.policy
+    for name, lo, hi in (
+        ("base_ang_vel", -0.5, 0.5),
+        ("joint_pos", -0.05, 0.05),
+        ("joint_vel", -2.0, 2.0),
+        ("projected_gravity", -0.05, 0.05),
+    ):
+        term = getattr(policy, name, None)
+        if term is not None:
+            term.noise = Unoise(n_min=lo, n_max=hi)
+    del spec
+
+
+def apply_shared_locomotion(cfg, spec: RobotSpec, *, stage: int) -> None:
+    apply_paper_dr(cfg, spec)
 
     cfg.rewards.lin_vel_z_l2.weight = -2.0 if spec.name == "h1" else 0.0
     cfg.rewards.ang_vel_xy_l2.weight = -0.05
@@ -277,6 +314,10 @@ def apply_play(cfg) -> None:
     cfg.scene.env_spacing = 6.0
     cfg.episode_length_s = 40.0
     cfg.observations.policy.enable_corruption = False
+    cfg.events.add_base_mass = None
+    cfg.events.base_com = None
+    cfg.events.push_robot = None
+    cfg.events.base_external_force_torque = None
     pose_range = cfg.events.reset_base.params.get("pose_range", {})
     pose_range["x"] = (-0.2, 0.2)
     pose_range["y"] = (-0.08, 0.08)

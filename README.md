@@ -45,7 +45,8 @@ Configs exist for these paper pieces. They have **not** been trained to paper nu
 - Double-critic PPO (locomotion vs foothold, `w2=0.25`)
 - Sampling-based foothold (15 points in the foot frame)
 - Beam-width curriculum (easy → 20 cm)
-- Elevation-map noise on the task height scan (not full appendix IX DR)
+- Elevation-map noise on the task height scan (appendix VI-C yaw/tilt, dilate, map-repeat)
+- Table IX payload / CoM / friction / observation noise on existing Isaac Lab event terms
 
 ### Key Differences from Your Original Setup
 

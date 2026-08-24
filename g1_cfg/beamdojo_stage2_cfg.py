@@ -33,7 +33,7 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": BeamDojoStage2G1EnvCfg,
-        "rsl_rl_cfg_entry_point": "beamdojo_agents.rsl_rl_ppo_cfg:BeamDojoG1PPORunnerCfg",
+        "rsl_rl_cfg_entry_point": "beamdojo_agents.rsl_rl_ppo_cfg:BeamDojoG1Stage2PPORunnerCfg",
     },
 )
 
@@ -43,6 +43,6 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": BeamDojoStage2G1EnvCfg_PLAY,
-        "rsl_rl_cfg_entry_point": "beamdojo_agents.rsl_rl_ppo_cfg:BeamDojoG1PPORunnerCfg",
+        "rsl_rl_cfg_entry_point": "beamdojo_agents.rsl_rl_ppo_cfg:BeamDojoG1Stage2PPORunnerCfg",
     },
 )

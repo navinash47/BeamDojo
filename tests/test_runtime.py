@@ -147,6 +147,8 @@ class GymIdSourceTests(unittest.TestCase):
             "Isaac-BeamDojo-Stage2-G1-v0",
         ]:
             self.assertIn(gym_id, text)
+        g1s2 = (root / "g1_cfg" / "beamdojo_stage2_cfg.py").read_text()
+        self.assertIn("BeamDojoG1Stage2PPORunnerCfg", g1s2)
 
     def test_stage2_catcher_and_ground_disable_are_wired(self):
         root = Path(__file__).resolve().parents[1]
@@ -159,6 +161,15 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("disable_ground_collision", common)
         self.assertIn("def disable_ground_collision", mdp)
         self.assertNotIn("No-op helper kept for wrappers", mdp)
+
+    def test_paper_table_ix_dr_is_wired(self):
+        common = (Path(__file__).resolve().parents[1] / "h1_cfg" / "beamdojo_common.py").read_text()
+        self.assertIn("def apply_paper_dr", common)
+        self.assertIn('mass_distribution_params"] = (-2.0, 2.0)', common)
+        self.assertIn("static_friction_range", common)
+        self.assertIn("apply_paper_dr(cfg, spec)", common)
+        # Training no longer zeros payload/CoM DR.
+        self.assertNotIn("cfg.events.add_base_mass = None\n    cfg.events.base_com = None\n    cfg.events.push_robot = None", common.split("def apply_play")[0])
 
 
 if __name__ == "__main__":
