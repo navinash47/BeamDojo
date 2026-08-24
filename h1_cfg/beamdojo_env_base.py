@@ -9,6 +9,7 @@ subclasses for the same reason. Stage 1/2 H1/G1 env classes inherit
 
 from __future__ import annotations
 
+from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.utils import configclass
 from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import (
     CurriculumCfg,
@@ -26,8 +27,8 @@ from h1_cfg.scene_props import STONE_COUNT
 class BeamDojoSceneCfg(MySceneCfg):
     """Parent locomotion scene plus BeamDojo task geometry."""
 
-    task_beam = None
-    catcher = None
+    task_beam: RigidObjectCfg | None = None
+    catcher: AssetBaseCfg | None = None
     task_stone_0 = None
     task_stone_1 = None
     task_stone_2 = None

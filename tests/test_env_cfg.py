@@ -39,6 +39,8 @@ class EnvCfgContractTests(unittest.TestCase):
             "init_beamdojo",
         ):
             self.assertIn(needle, src)
+        self.assertIn("task_beam: RigidObjectCfg | None = None", src)
+        self.assertIn("catcher: AssetBaseCfg | None = None", src)
 
     def test_stage_cfgs_inherit_beamdojo_env(self):
         for rel in (
@@ -76,6 +78,19 @@ class EnvCfgContractTests(unittest.TestCase):
         props = _read("h1_cfg/scene_props.py")
         self.assertIn("STONE_COUNT = 24", props)
         self.assertIn("count: int = STONE_COUNT", props)
+        self.assertIn("RigidObjectCfg", props)
+        self.assertIn("def _kinematic_cuboid", props)
+        self.assertIn("kinematic_enabled=True", props)
+        self.assertIn("physics_material=_WALK_MATERIAL", props)
+        self.assertIn("collision_group=-1", props)
+        self.assertIn("def catcher_cfg", props)
+        self.assertIn("AssetBaseCfg", props)
+        catcher = props.split("def catcher_cfg", 1)[1]
+        self.assertIn("return AssetBaseCfg(", catcher)
+        self.assertNotIn("return RigidObjectCfg(", catcher)
+        beam = props.split("def task_beam_cfg", 1)[1].split("def stone_cfg", 1)[0]
+        self.assertIn("return RigidObjectCfg(", beam)
+        self.assertNotIn("return AssetBaseCfg(", beam)
 
 
 if __name__ == "__main__":

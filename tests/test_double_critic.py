@@ -68,6 +68,30 @@ class DoubleCriticModuleTests(unittest.TestCase):
             dc.PPO = previous
         self.assertEqual(out, {"gamma": 0.9, "lam": 0.8})
 
+    def test_default_rnd_dict_becomes_none(self):
+        import beamdojo_agents.double_critic as dc
+
+        class FakePPO:
+            def __init__(self, policy, gamma=0.99, lam=0.95, rnd_cfg=None, symmetry_cfg=None):
+                del policy, gamma, lam, rnd_cfg, symmetry_cfg
+
+        previous = dc.PPO
+        dc.PPO = FakePPO
+        try:
+            out = dc._ppo_init_kwargs(
+                {
+                    "gamma": 0.99,
+                    "lam": 0.95,
+                    "rnd_cfg": {"weight": 0.0, "learning_rate": 1e-3},
+                    "symmetry_cfg": {},
+                }
+            )
+        finally:
+            dc.PPO = previous
+        self.assertEqual(out["gamma"], 0.99)
+        self.assertIsNone(out["rnd_cfg"])
+        self.assertIsNone(out["symmetry_cfg"])
+
 
 if __name__ == "__main__":
     unittest.main()

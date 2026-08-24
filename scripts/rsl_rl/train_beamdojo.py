@@ -254,10 +254,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
         env = beamdojo_runtime.FootholdExtrasWrapper(env)
         env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
+        train_cfg = beamdojo_runtime.runner_cfg_dict(agent_cfg)
         if agent_cfg.class_name == "OnPolicyRunner":
-            runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+            runner = OnPolicyRunner(env, train_cfg, log_dir=log_dir, device=agent_cfg.device)
         elif agent_cfg.class_name == "DistillationRunner":
-            runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+            runner = DistillationRunner(env, train_cfg, log_dir=log_dir, device=agent_cfg.device)
         else:
             raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
         runner.add_git_repo_to_log(__file__)

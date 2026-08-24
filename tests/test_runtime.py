@@ -421,6 +421,54 @@ class TrainingStatusTests(unittest.TestCase):
         self.assertEqual(env.extras["log"]["foothold_penalty"], [-0.02])
 
 
+class RunnerCfgSanitizeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.rt = _load_runtime()
+
+    def test_empty_hydra_rnd_cfg_is_sanitized_to_none(self):
+        cfg = {
+            "algorithm": {
+                "class_name": "PPO",
+                "rnd_cfg": {},
+                "symmetry_cfg": {},
+            }
+        }
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertIsNone(cfg["algorithm"]["rnd_cfg"])
+        self.assertIsNone(cfg["algorithm"]["symmetry_cfg"])
+
+    def test_default_isaaclab_rnd_dump_is_sanitized_to_none(self):
+        cfg = {
+            "algorithm": {
+                "rnd_cfg": {
+                    "weight": 0.0,
+                    "weight_schedule": None,
+                    "learning_rate": 0.001,
+                    "predictor_hidden_dims": [-1],
+                    "target_hidden_dims": [-1],
+                }
+            }
+        }
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertIsNone(cfg["algorithm"]["rnd_cfg"])
+
+    def test_populated_rnd_cfg_is_left_intact(self):
+        rnd = {"weight": 0.1, "learning_rate": 1e-4}
+        cfg = {"algorithm": {"rnd_cfg": dict(rnd)}}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["algorithm"]["rnd_cfg"], rnd)
+
+    def test_runner_cfg_dict_sanitizes_to_dict_payload(self):
+        class Agent:
+            def to_dict(self):
+                return {"algorithm": {"rnd_cfg": {}, "symmetry_cfg": {}}}
+
+        out = self.rt.runner_cfg_dict(Agent())
+        self.assertIsNone(out["algorithm"]["rnd_cfg"])
+        self.assertIsNone(out["algorithm"]["symmetry_cfg"])
+
+
 class GymIdSourceTests(unittest.TestCase):
     def test_cfg_files_register_expected_ids(self):
         root = Path(__file__).resolve().parents[1]
@@ -455,6 +503,10 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("WANDB_ENTITY", env_sh)
         play = (root / "scripts" / "rsl_rl" / "play_beamdojo.py").read_text()
         self.assertIn("pick_play_checkpoint", play)
+        self.assertIn("beamdojo_runtime.runner_cfg_dict(agent_cfg)", play)
+        self.assertIn("beamdojo_runtime.runner_cfg_dict(agent_cfg)", train)
+        self.assertNotIn("OnPolicyRunner(env, agent_cfg.to_dict()", train)
+        self.assertNotIn("OnPolicyRunner(env, agent_cfg.to_dict()", play)
         stage2 = (root / "scripts" / "cloud" / "train_stage2.sh").read_text()
         self.assertIn("beamdojo_${ROBOT}_stage1", stage2)
         self.assertNotIn("model_9999.pt", stage2)
@@ -470,6 +522,7 @@ class GymIdSourceTests(unittest.TestCase):
         mdp = (root / "h1_cfg" / "mdp.py").read_text()
         self.assertIn("def catcher_cfg", props)
         self.assertIn("CATCHER_Z", props)
+        self.assertIn("collision_group=-1", props)
         self.assertIn("cfg.scene.catcher = catcher_cfg()", common)
         self.assertIn("disable_ground_collision", common)
         self.assertIn("def disable_ground_collision", mdp)

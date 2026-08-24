@@ -109,6 +109,56 @@ def stage2_fine_tunes_stage1(
     )
 
 
+def inactive_rsl_optional_cfg(name: str, value) -> bool:
+    """True when rsl-rl 3.0.1 must see ``None`` instead of a Hydra leftover.
+
+    OnPolicyRunner enables RND/symmetry with ``if cfg is not None``. An empty
+    dict, or Isaac Lab's default ``RslRlRndCfg(weight=0.0)`` dump, is not None
+    and then looks up a missing ``rnd_state`` obs group after Isaac boot.
+    """
+    if value is None:
+        return True
+    if not isinstance(value, dict):
+        return False
+    if not value:
+        return True
+    if name == "rnd_cfg":
+        try:
+            weight = float(value.get("weight") or 0.0)
+        except (TypeError, ValueError):
+            weight = 0.0
+        return weight == 0.0 and not value.get("weight_schedule")
+    if name == "symmetry_cfg":
+        return not value.get("use_data_augmentation") and not value.get("use_mirror_loss")
+    return False
+
+
+def sanitize_rsl_rl_train_cfg(train_cfg: dict) -> dict:
+    """Drop empty Hydra RND/symmetry dicts before OnPolicyRunner / PPO 3.0.1.
+
+    ``RslRlPpoAlgorithmCfg.rnd_cfg`` defaults to None. OmegaConf sometimes turns
+    that into ``{}`` or a default ``RslRlRndCfg`` dump. rsl-rl then treats it as
+    enabled (``is not None``), looks up a missing ``rnd_state`` obs group, and
+    ``PPO.__init__`` TypeErrors.
+    """
+    if not isinstance(train_cfg, dict):
+        return train_cfg
+    algorithm = train_cfg.get("algorithm")
+    if isinstance(algorithm, dict):
+        for key in ("rnd_cfg", "symmetry_cfg"):
+            if inactive_rsl_optional_cfg(key, algorithm.get(key)):
+                algorithm[key] = None
+    return train_cfg
+
+
+def runner_cfg_dict(agent_cfg) -> dict:
+    """``OnPolicyRunner(..., train_cfg, ...)`` payload after Hydra sanitize."""
+    cfg = agent_cfg.to_dict() if hasattr(agent_cfg, "to_dict") else dict(agent_cfg)
+    if not isinstance(cfg, dict):
+        raise TypeError(f"agent cfg to_dict() must return a dict, got {type(cfg)}")
+    return sanitize_rsl_rl_train_cfg(cfg)
+
+
 def remaining_learning_iterations(current: int | None, max_iterations: int) -> int:
     """PPO iters so the run *ends* at ``max_iterations`` (paper: 10k / stage).
 

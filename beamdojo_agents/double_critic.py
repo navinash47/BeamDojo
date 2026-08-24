@@ -112,7 +112,25 @@ def _ppo_init_kwargs(kwargs: dict) -> dict:
     extra = [key for key in kwargs if key not in allowed]
     if extra:
         print(f"[WARN] PPODoubleCritic dropping unknown PPO kwargs: {extra}")
-    return {key: value for key, value in kwargs.items() if key in allowed}
+    cleaned = {key: value for key, value in kwargs.items() if key in allowed}
+    for key in ("rnd_cfg", "symmetry_cfg"):
+        if key not in cleaned:
+            continue
+        value = cleaned[key]
+        inactive = value is None or value == {} or value == []
+        if key == "rnd_cfg" and isinstance(value, dict):
+            try:
+                weight = float(value.get("weight") or 0.0)
+            except (TypeError, ValueError):
+                weight = 0.0
+            inactive = inactive or (weight == 0.0 and not value.get("weight_schedule"))
+        if key == "symmetry_cfg" and isinstance(value, dict):
+            inactive = inactive or (
+                not value.get("use_data_augmentation") and not value.get("use_mirror_loss")
+            )
+        if inactive:
+            cleaned[key] = None
+    return cleaned
 
 
 class PPODoubleCritic(PPO):
