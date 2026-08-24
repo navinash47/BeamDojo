@@ -65,6 +65,8 @@ class EnvCfgContractTests(unittest.TestCase):
         self.assertIn("Spawn on the beam", common)
         self.assertIn('position_range"] = (1.0, 1.0)', common)
         self.assertIn("def _zero_root_reset_velocity", common)
+        self.assertIn("heading_command = False", common)
+        self.assertIn("debug_vis = False", common)
 
     def test_stone_count_matches_declared_slots(self):
         props = _read("h1_cfg/scene_props.py")

@@ -272,8 +272,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
                 runner.current_learning_iteration = 0
                 print("[INFO] Stage 2 fine-tune: Stage 1 weights loaded, PPO iteration reset to 0.")
 
-        dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
-        dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+        try:
+            dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
+            dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+        except Exception as dump_exc:
+            print(f"[WARN] Could not dump cfg yaml ({type(dump_exc).__name__}): {dump_exc}")
 
         status_body["wandb_url"] = beamdojo_runtime.live_wandb_url(
             getattr(agent_cfg, "wandb_project", "beamdojo")
@@ -282,8 +285,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
         beamdojo_runtime.write_training_status({**status_body, "status": "running", "iteration": it0})
         beamdojo_runtime.attach_status_heartbeat(runner, status_body, every=10)
 
-        print(f"Target iterations: {agent_cfg.max_iterations}")
-        runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+        remaining = beamdojo_runtime.remaining_learning_iterations(it0, agent_cfg.max_iterations)
+        print(f"Target iterations: {agent_cfg.max_iterations} (starting at {it0}, remaining {remaining})")
+        if remaining == 0:
+            print("[INFO] Already at max_iterations; skipping learn().")
+        else:
+            runner.learn(num_learning_iterations=remaining, init_at_random_ep_len=True)
         it = int(getattr(runner, "current_learning_iteration", 0) or 0)
         ckpt = os.path.join(log_dir, f"model_{it}.pt")
         beamdojo_runtime.mark_training_idle(

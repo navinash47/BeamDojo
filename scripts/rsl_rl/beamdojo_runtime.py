@@ -109,6 +109,18 @@ def stage2_fine_tunes_stage1(
     )
 
 
+def remaining_learning_iterations(current: int | None, max_iterations: int) -> int:
+    """PPO iters so the run *ends* at ``max_iterations`` (paper: 10k / stage).
+
+    rsl-rl 3.0.1 ``learn(n)`` is ``range(current, current + n)``. Passing the
+    configured max after a resume at iter 500 would train to 10500 and the
+    W&B / Research Lab step axis would not be a 10k Stage 1/2 run.
+    """
+    start = int(current or 0)
+    target = int(max_iterations)
+    return max(0, target - start)
+
+
 def resolve_resume_checkpoint(
     log_root: str | os.PathLike,
     load_run: str | None = None,

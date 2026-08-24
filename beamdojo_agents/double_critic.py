@@ -92,11 +92,34 @@ class ActorCriticDouble(ActorCritic):
         return True
 
 
+def _ppo_init_kwargs(kwargs: dict) -> dict:
+    """rsl-rl 3.0.1 ``PPO.__init__`` has no ``**kwargs``; extra Hydra keys TypeError."""
+    if PPO is object or PPO is None:
+        return dict(kwargs)
+    try:
+        import inspect
+
+        params = inspect.signature(PPO.__init__).parameters
+    except (TypeError, ValueError):
+        return dict(kwargs)
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return dict(kwargs)
+    allowed = {
+        name
+        for name, p in params.items()
+        if name != "self" and p.kind is not inspect.Parameter.VAR_POSITIONAL
+    }
+    extra = [key for key in kwargs if key not in allowed]
+    if extra:
+        print(f"[WARN] PPODoubleCritic dropping unknown PPO kwargs: {extra}")
+    return {key: value for key, value in kwargs.items() if key in allowed}
+
+
 class PPODoubleCritic(PPO):
     """PPO with two value heads and mixed normalized advantages."""
 
     def __init__(self, policy, w1: float = W1, w2: float = W2, **kwargs):
-        super().__init__(policy, **kwargs)
+        super().__init__(policy, **_ppo_init_kwargs(kwargs))
         self.w1 = float(w1)
         self.w2 = float(w2)
         self.foot_rewards = None

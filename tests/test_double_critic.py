@@ -53,6 +53,21 @@ class DoubleCriticModuleTests(unittest.TestCase):
         self.assertGreater(clear_at, step_at)
         self.assertIn("set_to_none=True", src[clear_at:])
 
+    def test_unknown_ppo_kwargs_are_dropped(self):
+        import beamdojo_agents.double_critic as dc
+
+        class FakePPO:
+            def __init__(self, policy, gamma=0.99, lam=0.95):
+                del policy, gamma, lam
+
+        previous = dc.PPO
+        dc.PPO = FakePPO
+        try:
+            out = dc._ppo_init_kwargs({"gamma": 0.9, "class_name": "PPO", "lam": 0.8})
+        finally:
+            dc.PPO = previous
+        self.assertEqual(out, {"gamma": 0.9, "lam": 0.8})
+
 
 if __name__ == "__main__":
     unittest.main()

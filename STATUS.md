@@ -24,5 +24,5 @@
 - Table IX / appendix VI-C: payload ±2 kg, CoM ±5 cm, friction 0.4–1.0, obs noise, elevation yaw/tilt/dilate/repeat. Play configs still disable DR. Payload/CoM DR targets `spec.torso_body` (`torso_link` on H1 and G1).
 - G1 uses `G1_MINIMAL_CFG`, feet `.*_ankle_roll_link`, 12 lower-body actions. Official G1 finger deviation + hip/knee acc / hip-knee-ankle torque filters are on. Do not claim paper numbers until a real G1 train finishes.
 - H1 locomotion spawn is `H1_MINIMAL_CFG` (same kinematics, fewer collision meshes) so 1024 envs can fit an A10. Env classes inherit `BeamDojoEnvCfg` so Hydra keeps foothold / beam / stones / G1 extras.
-- Stage 2 reset pose stays on the beam (y ±8 cm, small yaw); root velocity and joint-scale randomization match official H1/G1 (zero twist, identity joint scale).
+- Stage 2 reset pose stays on the beam (y ±8 cm, small yaw); heading command is off so a random yaw target cannot walk the robot off the cuboid. Root velocity and joint-scale randomization match official H1/G1 (zero twist, identity joint scale). Resume continues until the configured 10k, not 10k *more* than the checkpoint iter.
 - **Do not git-commit checkpoints or weights.**

@@ -74,6 +74,12 @@ class TaskRoutingTests(unittest.TestCase):
             self.rt.stage2_fine_tunes_stage1(2, "h1", load_experiment="beamdojo_h1_stage2")
         )
 
+    def test_remaining_iters_stop_at_configured_max(self):
+        self.assertEqual(self.rt.remaining_learning_iterations(0, 10_000), 10_000)
+        self.assertEqual(self.rt.remaining_learning_iterations(500, 10_000), 9_500)
+        self.assertEqual(self.rt.remaining_learning_iterations(10_000, 10_000), 0)
+        self.assertEqual(self.rt.remaining_learning_iterations(None, 10_000), 10_000)
+
     def test_resume_picks_highest_iteration_not_missing_9999(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp) / "2026-08-24_12-00-00"
@@ -349,6 +355,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("resolve_resume_checkpoint", train)
         self.assertIn("stage2_fine_tunes_stage1", train)
         self.assertIn("current_learning_iteration = 0", train)
+        self.assertIn("remaining_learning_iterations", train)
+        self.assertIn("Could not dump cfg yaml", train)
         play = (root / "scripts" / "rsl_rl" / "play_beamdojo.py").read_text()
         self.assertIn("pick_play_checkpoint", play)
         stage2 = (root / "scripts" / "cloud" / "train_stage2.sh").read_text()

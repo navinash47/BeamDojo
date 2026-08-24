@@ -266,6 +266,9 @@ def apply_shared_locomotion(cfg, spec: RobotSpec, *, stage: int) -> None:
 
     if spec.action_joints is not None and hasattr(cfg.actions, "joint_pos"):
         cfg.actions.joint_pos.joint_names = spec.action_joints
+    if hasattr(cfg.commands, "base_velocity"):
+        # 1024-env command arrows are a common Isaac Lab headless hitch.
+        cfg.commands.base_velocity.debug_vis = False
 
     start_w = BEAM_WIDTH_HARD if stage == 1 else BEAM_WIDTH_EASY
     cfg.events.init_beamdojo = EventTerm(
@@ -359,6 +362,8 @@ def apply_stage2(cfg, spec: RobotSpec = H1, *, stones: bool = False) -> None:
     cfg.commands.base_velocity.ranges.lin_vel_y = (-0.15, 0.15)
     cfg.commands.base_velocity.ranges.ang_vel_z = (-0.4, 0.4)
     cfg.commands.base_velocity.rel_standing_envs = 0.1
+    # Parent ANYmal heading target yaws the robot off a 20–40 cm beam.
+    cfg.commands.base_velocity.heading_command = False
 
     if not stones:
         cfg.curriculum.beam_width = CurrTerm(
