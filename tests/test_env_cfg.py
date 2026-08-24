@@ -73,6 +73,10 @@ class EnvCfgContractTests(unittest.TestCase):
         self.assertIn("heading_command = False", shared)
         self.assertIn("cfg.scene.height_scanner = None", common)
         self.assertNotIn("RayCasterCfg", common)
+        self.assertIn("def apply_physx_gpu_capacity", common)
+        self.assertIn("gpu_max_rigid_patch_count", common)
+        self.assertIn("apply_physx_gpu_capacity(cfg, stones=False)", common)
+        self.assertIn("apply_physx_gpu_capacity(cfg, stones=stones)", common)
 
     def test_stone_count_matches_declared_slots(self):
         props = _read("h1_cfg/scene_props.py")

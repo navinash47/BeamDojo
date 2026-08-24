@@ -436,18 +436,64 @@ def _as_log_scalar(value):
     return value
 
 
+def _patch_wandb_config_update() -> None:
+    """rsl-rl 3.0.1 ``WandbSummaryWriter.__init__`` calls ``wandb.config.update``
+    *after* ``wandb.init``. A JSON-serializable failure there aborts the writer
+    constructor, ``_prepare_logging_writer`` falls back to TensorBoard, and the
+    live W&B page never gets PPO scalars.
+    """
+    try:
+        from wandb.sdk.wandb_config import Config
+    except Exception:
+        return
+    orig = getattr(Config, "update", None)
+    if not callable(orig) or getattr(orig, "_beamdojo_keep_alive", False):
+        return
+
+    def update(self, *args, **kwargs):
+        kwargs.setdefault("allow_val_change", True)
+        return _keep_wandb_call("config.update", orig, self, *args, **kwargs)
+
+    update._beamdojo_keep_alive = True
+    Config.update = update
+
+
 def _patch_wandb_writer() -> None:
     """Keep a 10k CUDA run alive if W&B JSON/HTTP fails after wandb.init."""
     try:
         from rsl_rl.utils.wandb_utils import WandbSummaryWriter
     except Exception:
         return
+    _patch_wandb_config_update()
     if getattr(WandbSummaryWriter, "_beamdojo_keep_alive", False):
         return
+    orig_init = WandbSummaryWriter.__init__
     orig_store = WandbSummaryWriter.store_config
     orig_add = WandbSummaryWriter.add_scalar
     orig_save_file = getattr(WandbSummaryWriter, "save_file", None)
     orig_save_model = getattr(WandbSummaryWriter, "save_model", None)
+
+    def __init__(self, log_dir, flush_secs, cfg):
+        try:
+            orig_init(self, log_dir, flush_secs, cfg)
+            return
+        except Exception as exc:
+            print(
+                f"[WARN] WandbSummaryWriter setup recovered ({type(exc).__name__}: {exc}). "
+                "Keeping the W&B run if wandb.init already succeeded."
+            )
+        if not hasattr(self, "name_map"):
+            self.name_map = {
+                "Train/mean_reward/time": "Train/mean_reward_time",
+                "Train/mean_episode_length/time": "Train/mean_episode_length_time",
+            }
+        try:
+            import wandb
+
+            if wandb.run is None:
+                raise RuntimeError("wandb.init did not create a run")
+        except Exception:
+            raise
 
     def store_config(self, env_cfg, runner_cfg, alg_cfg, policy_cfg):
         _keep_wandb_call("store_config", orig_store, self, env_cfg, runner_cfg, alg_cfg, policy_cfg)
@@ -463,6 +509,7 @@ def _patch_wandb_writer() -> None:
             **kwargs,
         )
 
+    WandbSummaryWriter.__init__ = __init__
     WandbSummaryWriter.store_config = store_config
     WandbSummaryWriter.add_scalar = add_scalar
     if callable(orig_save_file):

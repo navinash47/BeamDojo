@@ -493,6 +493,13 @@ class TrainingStatusTests(unittest.TestCase):
         self.rt._patch_store_code_state(FakeOpr)
         self.assertEqual(FakeOpr.store_code_state("logs", []), [])
 
+    def test_wandb_writer_patch_recovers_init_and_config_update(self):
+        src = Path(__file__).resolve().parents[1] / "scripts" / "rsl_rl" / "beamdojo_runtime.py"
+        text = src.read_text()
+        self.assertIn("def _patch_wandb_config_update", text)
+        self.assertIn("allow_val_change", text)
+        self.assertIn("Keeping the W&B run if wandb.init already succeeded", text)
+
     def test_wrapper_writes_log_and_top_level_foothold(self):
         rt = self.rt
 
@@ -642,6 +649,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("return RigidObjectCfg(", relaunch)
         self.assertIn("sanitize_rsl_rl_train_cfg", relaunch)
         self.assertIn("_patch_store_code_state", relaunch)
+        self.assertIn("safe.directory", relaunch)
+        self.assertIn("apply_physx_gpu_capacity", relaunch)
 
     def test_stage2_catcher_and_ground_disable_are_wired(self):
         root = Path(__file__).resolve().parents[1]

@@ -8,6 +8,9 @@ REF="${BEAMDOJO_GIT_REF:-cursor/dual-terrain-stage2-g1-73ce}"
 # Pull the GPU-path + live W&B writer before sourcing _env.sh (that script cds).
 if [[ -d "$REPO/.git" ]]; then
   echo "Syncing BeamDojo ${REF} so this A10 trains the current dual-terrain / W&B path."
+  # Lambda/Docker often flags the NFS checkout as dubious ownership; fetch then fails
+  # and the box trains a stale tree that still dies after Isaac boot.
+  git config --global --add safe.directory "$REPO" || true
   git -C "$REPO" fetch origin "$REF" || git -C "$REPO" fetch origin || echo "[WARN] git fetch failed; using checkout as-is."
   if git -C "$REPO" show-ref --verify --quiet "refs/remotes/origin/${REF}" || git -C "$REPO" show-ref --verify --quiet "refs/heads/${REF}"; then
     git -C "$REPO" checkout "$REF" || git -C "$REPO" checkout -B "$REF" "origin/${REF}" || true
@@ -25,6 +28,10 @@ if ! grep -q "def sanitize_rsl_rl_train_cfg" "$REPO/scripts/rsl_rl/beamdojo_runt
 fi
 if ! grep -q "def _patch_store_code_state" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing git-diff keep-alive. Pull ${REF} or dubious-ownership git status aborts learn()." >&2
+  exit 1
+fi
+if ! grep -q "def apply_physx_gpu_capacity" "$REPO/h1_cfg/beamdojo_common.py"; then
+  echo "beamdojo_common.py is missing PhysX GPU buffer bump. Pull ${REF} or cloned beams/stones overflow contact buffers." >&2
   exit 1
 fi
 

@@ -278,6 +278,35 @@ def apply_shared_locomotion(cfg, spec: RobotSpec, *, stage: int) -> None:
     )
 
 
+def apply_physx_gpu_capacity(cfg, *, stones: bool = False) -> None:
+    """Raise PhysX GPU buffers for cloned beam/stone cuboids (Isaac Lab 2.3.2).
+
+    Parent locomotion sets ``gpu_max_rigid_patch_count = 10 * 2**15``. Dual-terrain
+    adds a kinematic cuboid per env (Stage 2: colliding beam, or 24 stones × 1024
+    envs). Undersized GPU contact/patch buffers abort the sim before ``learn()``
+    or W&B ever start.
+    """
+    physx = getattr(getattr(cfg, "sim", None), "physx", None)
+    if physx is None:
+        return
+
+    def _raise(name: str, floor: int) -> None:
+        current = getattr(physx, name, None)
+        try:
+            value = int(current or 0)
+        except (TypeError, ValueError):
+            value = 0
+        setattr(physx, name, max(value, floor))
+
+    _raise("gpu_max_rigid_patch_count", 2**20)
+    _raise("gpu_max_rigid_contact_count", 2**24)
+    _raise("gpu_found_lost_pairs_capacity", 2**22)
+    if stones:
+        _raise("gpu_max_rigid_patch_count", 2**21)
+        _raise("gpu_found_lost_pairs_capacity", 2**23)
+        _raise("gpu_total_aggregate_pairs_capacity", 2**23)
+
+
 def apply_stage1(cfg, spec: RobotSpec = H1) -> None:
     cfg.scene.num_envs = 1024
     cfg.scene.env_spacing = 8.0
@@ -288,6 +317,7 @@ def apply_stage1(cfg, spec: RobotSpec = H1) -> None:
     apply_sensors(cfg, spec)
     cfg.scene.task_beam = task_beam_cfg(collision=False, width=BEAM_WIDTH_HARD, center_z=0.02)
     apply_shared_locomotion(cfg, spec, stage=1)
+    apply_physx_gpu_capacity(cfg, stones=False)
 
     cfg.rewards.base_height_penalty.params["target_height"] = spec.pelvis_z
 
@@ -320,6 +350,7 @@ def apply_stage2(cfg, spec: RobotSpec = H1, *, stones: bool = False) -> None:
         start_w = BEAM_WIDTH_EASY
     cfg.scene.catcher = catcher_cfg()
     apply_shared_locomotion(cfg, spec, stage=2)
+    apply_physx_gpu_capacity(cfg, stones=stones)
     cfg.events.init_beamdojo.params["terrain"] = terrain
     cfg.events.init_beamdojo.params["width"] = start_w
     cfg.events.disable_ground = EventTerm(
