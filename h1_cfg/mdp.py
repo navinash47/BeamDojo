@@ -8,6 +8,7 @@ import torch
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import quat_apply
 
+from beamdojo_mdp.curriculum import physical_beam_scale_y, should_update_physical_width, task_beam_prim_paths
 from beamdojo_mdp.heightfield import (
     BEAM_OFF_Z,
     BEAM_ON_Z,
@@ -271,7 +272,7 @@ def tighten_beam_width(
     end_width: float = 0.20,
     horizon_steps: int = 240_000,
 ) -> None:
-    """Global curriculum: imagined / effective beam width start → end."""
+    """Global curriculum: task map and Stage 2 collision cuboid start → end."""
     env = _raw(env)
     if not hasattr(env, "beamdojo_width"):
         init_beamdojo_state(env, width=start_width)
@@ -279,6 +280,39 @@ def tighten_beam_width(
     t = min(max(step / max(horizon_steps, 1), 0.0), 1.0)
     w = start_width + (end_width - start_width) * t
     env.beamdojo_width[:] = w
+    prev = getattr(env, "beamdojo_phys_width", None)
+    if should_update_physical_width(None if prev is None else float(prev), w):
+        env.beamdojo_phys_width = w
+        _scale_task_beam_prims(env, physical_beam_scale_y(w, start_width))
+
+
+def _scale_task_beam_prims(env: ManagerBasedRLEnv, scale_y: float) -> None:
+    """Resize cloned TaskBeam cuboids so Stage 2 physics matches the curriculum width."""
+    try:
+        import omni.usd
+        from pxr import Gf, UsdGeom
+    except ImportError:
+        return
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return
+    scene = getattr(env, "scene", None)
+    roots = getattr(scene, "env_prim_paths", None)
+    n = int(getattr(env, "num_envs", 0) or 0)
+    sy = float(scale_y)
+    for path in task_beam_prim_paths(roots, n):
+        prim = stage.GetPrimAtPath(path)
+        if not prim or not prim.IsValid():
+            continue
+        xform = UsdGeom.Xformable(prim)
+        scale_op = None
+        for op in xform.GetOrderedXformOps():
+            if op.GetOpType() == UsdGeom.XformOp.TypeScale:
+                scale_op = op
+                break
+        if scale_op is None:
+            scale_op = xform.AddScaleOp()
+        scale_op.Set(Gf.Vec3f(1.0, sy, 1.0))
 
 
 def disable_ground_collision(
