@@ -258,6 +258,7 @@ def inject_double_critic() -> None:
     opr.ActorCriticDouble = ActorCriticDouble
     opr.PPODoubleCritic = PPODoubleCritic
     _patch_runner_foot_optimizer(opr.OnPolicyRunner)
+    _patch_runner_log_ep_infos(opr.OnPolicyRunner)
     _patch_store_code_state(opr)
     sync_wandb_identity_env()
     _patch_wandb_writer()
@@ -436,6 +437,91 @@ def _as_log_scalar(value):
     return value
 
 
+def _scalar_ep_info_value(value):
+    """Python float for extras['log']. rsl-rl 3.0.1 ``log()`` cats 0-dim / [1] numerics.
+
+    A per-env ``[N]`` tensor in the same dict as Isaac's ``Episode_Reward/*``
+    0-dim scalars makes ``torch.cat`` throw. That abort happens *before*
+    Loss/* and Train/mean_reward, so the live W&B page stays empty for the iter.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if number != number or number in (float("inf"), float("-inf")):
+            return None
+        return number
+    if isinstance(value, (str, bytes, dict)):
+        return None
+    numel = getattr(value, "numel", None)
+    if callable(numel):
+        try:
+            count = int(numel())
+        except Exception:
+            count = -1
+        if count <= 0:
+            return None
+        try:
+            tensor = value.float() if callable(getattr(value, "float", None)) else value
+            reduced = tensor.mean() if count > 1 else tensor
+            item = getattr(reduced, "item", None)
+            if callable(item):
+                return _scalar_ep_info_value(item())
+            return _scalar_ep_info_value(reduced)
+        except Exception:
+            return None
+    try:
+        seq = list(value)
+    except TypeError:
+        try:
+            return _scalar_ep_info_value(float(value))
+        except (TypeError, ValueError):
+            return None
+    acc: list[float] = []
+    for item in seq:
+        number = _scalar_ep_info_value(item)
+        if number is not None:
+            acc.append(number)
+    if not acc:
+        return None
+    return sum(acc) / len(acc)
+
+
+def sanitize_ep_infos_for_rsl_log(ep_infos) -> None:
+    """Collapse extras['log'] values to scalars in-place before OnPolicyRunner.log."""
+    if not isinstance(ep_infos, (list, tuple)):
+        return
+    for info in ep_infos:
+        if not isinstance(info, dict):
+            continue
+        drop = []
+        for key, value in info.items():
+            scalar = _scalar_ep_info_value(value)
+            if scalar is None:
+                drop.append(key)
+            else:
+                info[key] = scalar
+        for key in drop:
+            del info[key]
+
+
+def _patch_runner_log_ep_infos(runner_cls) -> None:
+    """Sanitize episode extras before rsl-rl 3.0.1 ``log()`` walks ``ep_infos``."""
+    if getattr(runner_cls, "_beamdojo_log_ep", False):
+        return
+    orig = runner_cls.log
+
+    def log(self, locs, *args, **kwargs):
+        if isinstance(locs, dict):
+            sanitize_ep_infos_for_rsl_log(locs.get("ep_infos"))
+        return orig(self, locs, *args, **kwargs)
+
+    runner_cls.log = log
+    runner_cls._beamdojo_log_ep = True
+
+
 def _patch_wandb_config_update() -> None:
     """rsl-rl 3.0.1 ``WandbSummaryWriter.__init__`` calls ``wandb.config.update``
     *after* ``wandb.init``. A JSON-serializable failure there aborts the writer
@@ -470,6 +556,7 @@ def _patch_wandb_writer() -> None:
     orig_init = WandbSummaryWriter.__init__
     orig_store = WandbSummaryWriter.store_config
     orig_add = WandbSummaryWriter.add_scalar
+    orig_log_config = getattr(WandbSummaryWriter, "log_config", None)
     orig_save_file = getattr(WandbSummaryWriter, "save_file", None)
     orig_save_model = getattr(WandbSummaryWriter, "save_model", None)
 
@@ -512,6 +599,10 @@ def _patch_wandb_writer() -> None:
     WandbSummaryWriter.__init__ = __init__
     WandbSummaryWriter.store_config = store_config
     WandbSummaryWriter.add_scalar = add_scalar
+    if callable(orig_log_config):
+        WandbSummaryWriter.log_config = lambda self, *args, **kwargs: _keep_wandb_call(
+            "log_config", orig_log_config, self, *args, **kwargs
+        )
     if callable(orig_save_file):
         WandbSummaryWriter.save_file = lambda self, path, iter=None: _keep_wandb_call(
             "save_file", orig_save_file, self, path, iter
@@ -701,6 +792,9 @@ def attach_status_heartbeat(runner, payload: dict, *, every: int = 10) -> None:
         return
 
     def _log(*args, **kwargs):
+        locs = args[0] if args else kwargs.get("locs")
+        if isinstance(locs, dict):
+            sanitize_ep_infos_for_rsl_log(locs.get("ep_infos"))
         try:
             result = orig_log(*args, **kwargs)
         except Exception as exc:
@@ -755,8 +849,26 @@ def install_status_signal_hooks(payload: dict) -> None:
     signal.signal(signal.SIGTERM, _handle)
 
 
+def _write_foothold_extras(extras, contrib) -> None:
+    """Per-env term on top-level extras; scalar only under extras['log']."""
+    extras["foothold_reward"] = contrib
+    extras["foothold_penalty"] = contrib
+    log = extras.get("log")
+    if not isinstance(log, dict):
+        return
+    # Isaac already writes Episode_Reward/foothold_penalty on reset. Never
+    # replace that 0-dim episode mean with a per-env [N] tensor.
+    scalar = _scalar_ep_info_value(contrib)
+    if scalar is not None:
+        log["foothold_penalty"] = scalar
+
+
 class FootholdExtrasWrapper:
-    """Gym wrapper: put per-step foothold term into extras for the double critic."""
+    """Gym wrapper: put per-step foothold term into extras for the double critic.
+
+    rsl-rl 3.0.1 ``OnPolicyRunner.log`` cats every ``extras['log']`` key. Keep the
+    per-env ``[N]`` tensor on the top-level extras dict for ``PPODoubleCritic``.
+    """
 
     def __init__(self, env):
         self.env = env
@@ -775,24 +887,10 @@ class FootholdExtrasWrapper:
         contrib = foot * dt
         info = result[-1]
         if isinstance(info, dict):
-            info["foothold_reward"] = contrib
-            info["foothold_penalty"] = contrib
-            log = info.get("log")
-            if not isinstance(log, dict):
-                log = {}
-                info["log"] = log
-            log["foothold_reward"] = contrib
-            log["foothold_penalty"] = contrib
+            _write_foothold_extras(info, contrib)
             raw_extras = getattr(raw, "extras", None)
             if isinstance(raw_extras, dict) and raw_extras is not info:
-                raw_extras["foothold_reward"] = contrib
-                raw_extras["foothold_penalty"] = contrib
-                raw_log = raw_extras.get("log")
-                if not isinstance(raw_log, dict):
-                    raw_log = {}
-                    raw_extras["log"] = raw_log
-                raw_log["foothold_reward"] = contrib
-                raw_log["foothold_penalty"] = contrib
+                _write_foothold_extras(raw_extras, contrib)
         return result
 
     def reset(self, *args, **kwargs):

@@ -499,6 +499,9 @@ class TrainingStatusTests(unittest.TestCase):
         self.assertIn("def _patch_wandb_config_update", text)
         self.assertIn("allow_val_change", text)
         self.assertIn("Keeping the W&B run if wandb.init already succeeded", text)
+        self.assertIn('"log_config", orig_log_config', text)
+        self.assertIn("def sanitize_ep_infos_for_rsl_log", text)
+        self.assertIn("def _patch_runner_log_ep_infos", text)
 
     def test_wrapper_writes_log_and_top_level_foothold(self):
         rt = self.rt
@@ -516,13 +519,14 @@ class TrainingStatusTests(unittest.TestCase):
                 self.unwrapped = self
 
             def step(self, _action):
-                return (None, None, None, None, {"log": {}})
+                return (None, None, None, None, {"log": {"Episode_Reward/foothold_penalty": 1.5}})
 
         env = Env()
         wrapped = rt.FootholdExtrasWrapper(env)
         info = wrapped.step(None)[-1]
         self.assertEqual(info["foothold_reward"], [-0.06, -0.02])
-        self.assertEqual(info["log"]["foothold_penalty"], [-0.06, -0.02])
+        self.assertEqual(info["log"]["Episode_Reward/foothold_penalty"], 1.5)
+        self.assertAlmostEqual(info["log"]["foothold_penalty"], -0.04)
 
     def test_wrapper_copies_foothold_onto_unwrapped_extras(self):
         rt = self.rt
@@ -533,7 +537,7 @@ class TrainingStatusTests(unittest.TestCase):
 
         class Env:
             unwrapped = None
-            extras = {"log": {}}
+            extras = {"log": {"Episode_Reward/foothold_penalty": 0.8}}
             beamdojo_foothold_step = Vec([-1.0])
             step_dt = 0.02
 
@@ -541,14 +545,54 @@ class TrainingStatusTests(unittest.TestCase):
                 self.unwrapped = self
 
             def step(self, _action):
-                return (None, None, None, None, {"log": {}})
+                return (None, None, None, None, {"log": {"Episode_Reward/foothold_penalty": 0.8}})
 
         env = Env()
         wrapped = rt.FootholdExtrasWrapper(env)
         info = wrapped.step(None)[-1]
         self.assertEqual(info["foothold_penalty"], [-0.02])
         self.assertEqual(env.extras["foothold_penalty"], [-0.02])
-        self.assertEqual(env.extras["log"]["foothold_penalty"], [-0.02])
+        self.assertEqual(env.extras["log"]["Episode_Reward/foothold_penalty"], 0.8)
+        self.assertAlmostEqual(env.extras["log"]["foothold_penalty"], -0.02)
+        self.assertAlmostEqual(info["log"]["foothold_penalty"], -0.02)
+
+    def test_sanitize_ep_infos_collapses_per_env_and_drops_junk(self):
+        infos = [
+            {"Episode_Reward/x": 1.0, "foothold_penalty": [-0.4, -0.2], "note": "nope"},
+            {"foothold_penalty": [-0.1]},
+        ]
+        self.rt.sanitize_ep_infos_for_rsl_log(infos)
+        self.assertEqual(infos[0]["Episode_Reward/x"], 1.0)
+        self.assertAlmostEqual(infos[0]["foothold_penalty"], -0.3)
+        self.assertNotIn("note", infos[0])
+        self.assertAlmostEqual(infos[1]["foothold_penalty"], -0.1)
+
+    def test_patched_log_sanitizes_before_writer(self):
+        seen = []
+
+        class Runner:
+            def log(self, locs, width=80, pad=35):
+                del width, pad
+                seen.append(locs["ep_infos"][0]["foothold_penalty"])
+
+        self.rt._patch_runner_log_ep_infos(Runner)
+        Runner().log({"ep_infos": [{"foothold_penalty": [-1.0, -3.0]}]})
+        self.assertEqual(seen, [-2.0])
+
+    def test_rsl_style_ep_info_cat_survives_sanitized_foothold(self):
+        """rsl-rl 3.0.1 log() cats every extras['log'] key; mixed [N] vs 0-dim throws."""
+        ep_infos = [
+            {"Episode_Reward/track": 1.0, "foothold_penalty": [-0.06, -0.02]},
+            {"Episode_Reward/track": 1.0, "foothold_penalty": [-0.04, 0.0]},
+        ]
+        self.rt.sanitize_ep_infos_for_rsl_log(ep_infos)
+        for key in ep_infos[0]:
+            infotensor = []
+            for ep_info in ep_infos:
+                value = ep_info[key]
+                self.assertIsInstance(value, float)
+                infotensor.append(value)
+            self.assertEqual(len(infotensor), 2)
 
 
 class RunnerCfgSanitizeTests(unittest.TestCase):
@@ -649,6 +693,7 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("return RigidObjectCfg(", relaunch)
         self.assertIn("sanitize_rsl_rl_train_cfg", relaunch)
         self.assertIn("_patch_store_code_state", relaunch)
+        self.assertIn("sanitize_ep_infos_for_rsl_log", relaunch)
         self.assertIn("safe.directory", relaunch)
         self.assertIn("apply_physx_gpu_capacity", relaunch)
         self.assertIn("PHYSX_PATCH_COUNT_BEAM", relaunch)

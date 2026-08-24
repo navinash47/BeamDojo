@@ -4,8 +4,9 @@
 def foothold_term_from_extras(extras):
     """Return the per-env foothold tensor/array, or None if extras has no term.
 
-    Isaac Lab logs the reward as ``foothold_penalty``. The gym wrapper also
-    writes ``foothold_reward`` on the extras dict and under ``extras['log']``.
+    Isaac Lab logs the episode mean as ``Episode_Reward/foothold_penalty``.
+    The gym wrapper writes the per-env term on the extras dict (not under
+    ``extras['log']``, which rsl-rl 3.0.1 treats as episode scalars).
     """
     if not isinstance(extras, dict):
         return None

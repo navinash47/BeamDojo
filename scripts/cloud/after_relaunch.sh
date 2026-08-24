@@ -30,6 +30,10 @@ if ! grep -q "def _patch_store_code_state" "$REPO/scripts/rsl_rl/beamdojo_runtim
   echo "beamdojo_runtime.py is missing git-diff keep-alive. Pull ${REF} or dubious-ownership git status aborts learn()." >&2
   exit 1
 fi
+if ! grep -q "def sanitize_ep_infos_for_rsl_log" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing extras['log'] sanitize. Pull ${REF} or a per-env foothold tensor in ep_infos blanks W&B for the iter." >&2
+  exit 1
+fi
 if ! grep -q "def apply_physx_gpu_capacity" "$REPO/h1_cfg/beamdojo_common.py"; then
   echo "beamdojo_common.py is missing PhysX GPU buffer bump. Pull ${REF} or cloned beams/stones overflow contact buffers." >&2
   exit 1
