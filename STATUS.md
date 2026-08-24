@@ -6,9 +6,9 @@
 - **Priority:** P1
 
 ## Next 3 tasks
-1. On the Lambda A10, start Stage 1: `bash scripts/cloud/train_stage1.sh` (1024 envs, 10k iters, `--logger wandb`).
-2. Watch curves at Weights & Biases project `beamdojo` (or TensorBoard over SSH). Copy NFS checkpoints off-box — never git-commit `.pt`.
-3. After Stage 1 walks the imagined beam: Stage 2 (`train_stage2.sh`) then G1 (`--robot g1`).
+1. A10 is **terminated when idle** (Lambda has no pause that keeps the VM). Confirm `model_*.pt` on `/lambda/nfs/beamdojo/logs` before terminate; keep the `beamdojo` filesystem.
+2. Next GPU session: same region, attach NFS at launch, then `bash scripts/cloud/train_stage1.sh` (1024 envs, 10k iters, `--logger wandb`).
+3. After Stage 1 walks the imagined beam: Stage 2 (`train_stage2.sh`) then G1 (`--robot g1`). Copy NFS checkpoints off-box — never git-commit `.pt`.
 
 ## Live training (browser)
 - **Weights & Biases** is the webpage for live metrics. Train with `WANDB_API_KEY` in gitignored `.env.lambda`. Project: `beamdojo`. URL: `https://wandb.ai/<entity>/beamdojo` (set `WANDB_ENTITY` to make the link exact). Once a run starts, `training-status.json` prefers `wandb.run.url`.
