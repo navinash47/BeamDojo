@@ -284,7 +284,7 @@ def apply_stage2(cfg, spec: RobotSpec = H1, *, stones: bool = False) -> None:
         params={"limit_angle": math.radians(45.0), "asset_cfg": SceneEntityCfg("robot")},
     )
     if hasattr(cfg.terminations, "base_contact") and cfg.terminations.base_contact is not None:
-        cfg.terminations.base_contact.params["sensor_cfg"].body_names = "torso_link"
+        cfg.terminations.base_contact.params["sensor_cfg"].body_names = spec.torso_body
     cfg.terminations.off_terrain = DoneTerm(
         func=bd_mdp.off_task_terrain,
         params={

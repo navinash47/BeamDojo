@@ -15,6 +15,7 @@ class RobotSpec:
     hip_roll: str
     arm_joints: list[str]
     torso_joint: str
+    torso_body: str
     action_joints: list[str] | None
     scanner_prim: str
 
@@ -28,6 +29,7 @@ H1 = RobotSpec(
     hip_roll=".*_hip_roll",
     arm_joints=[".*_shoulder_.*", ".*_elbow"],
     torso_joint="torso",
+    torso_body="torso_link",
     action_joints=None,
     scanner_prim="{ENV_REGEX_NS}/Robot/torso_link",
 )
@@ -47,6 +49,7 @@ G1 = RobotSpec(
         ".*_elbow_roll_joint",
     ],
     torso_joint="torso_joint",
+    torso_body="torso_link",
     # Paper: 12 lower-body actions (no arms).
     action_joints=[
         ".*_hip_yaw_joint",

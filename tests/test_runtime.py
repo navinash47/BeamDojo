@@ -84,6 +84,18 @@ class WandbUrlTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"WANDB_ENTITY": "lab"}, clear=True):
             self.assertEqual(self.rt.live_wandb_url("beamdojo"), "https://wandb.ai/lab/beamdojo")
 
+    def test_live_identity_reads_entity_from_run(self):
+        fake = mock.MagicMock()
+        fake.run = mock.MagicMock()
+        fake.run.url = "https://wandb.ai/fromrun/beamdojo/runs/xyz"
+        fake.run.entity = "fromrun"
+        fake.run.project = "beamdojo"
+        with mock.patch.dict("sys.modules", {"wandb": fake}):
+            url, entity, project = self.rt.live_wandb_identity("other")
+        self.assertEqual(url, "https://wandb.ai/fromrun/beamdojo/runs/xyz")
+        self.assertEqual(entity, "fromrun")
+        self.assertEqual(project, "beamdojo")
+
 
 class TrainingStatusTests(unittest.TestCase):
     @classmethod
@@ -132,6 +144,35 @@ class TrainingStatusTests(unittest.TestCase):
         self.assertEqual(data["status"], "running")
         self.assertEqual(data["iteration"], 10)
         self.assertEqual(data["wandb_url"], "https://wandb.ai/x/beamdojo")
+
+    def test_prepare_logging_writer_writes_run_url(self):
+        rt = self.rt
+        fake = mock.MagicMock()
+        fake.run = mock.MagicMock()
+        fake.run.url = "https://wandb.ai/x/beamdojo/runs/live1"
+        fake.run.entity = "x"
+        fake.run.project = "beamdojo"
+
+        class Runner:
+            current_learning_iteration = 0
+
+            def log(self, locs):
+                return locs
+
+            def _prepare_logging_writer(self):
+                return "writer"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo"}, clear=True):
+                    with mock.patch.dict("sys.modules", {"wandb": fake}):
+                        runner = Runner()
+                        rt.attach_status_heartbeat(runner, {"wandb_project": "beamdojo"}, every=10)
+                        self.assertEqual(runner._prepare_logging_writer(), "writer")
+                        data = json.loads((Path(tmp) / "tracking" / "training-status.json").read_text())
+        self.assertEqual(data["status"], "running")
+        self.assertEqual(data["wandb_url"], "https://wandb.ai/x/beamdojo/runs/live1")
+        self.assertEqual(data["wandb_entity"], "x")
 
     def test_mark_training_idle(self):
         rt = self.rt
@@ -211,6 +252,12 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("apply_paper_dr(cfg, spec)", common)
         # Training no longer zeros payload/CoM DR.
         self.assertNotIn("cfg.events.add_base_mass = None\n    cfg.events.base_com = None\n    cfg.events.push_robot = None", common.split("def apply_play")[0])
+
+    def test_stage2_base_contact_uses_robot_torso_body(self):
+        spec = (Path(__file__).resolve().parents[1] / "h1_cfg" / "robot_spec.py").read_text()
+        common = (Path(__file__).resolve().parents[1] / "h1_cfg" / "beamdojo_common.py").read_text()
+        self.assertIn("torso_body", spec)
+        self.assertIn("spec.torso_body", common)
 
 
 if __name__ == "__main__":

@@ -119,8 +119,11 @@ def wandb_project_url(project: str = "beamdojo") -> str:
     return "https://wandb.ai"
 
 
-def live_wandb_url(project: str = "beamdojo") -> str:
-    """Prefer the active W&B run URL once wandb.init has run; else the project page."""
+def live_wandb_identity(project: str = "beamdojo") -> tuple[str, str | None, str]:
+    """Active W&B run URL/entity/project once wandb.init has run; else env fallbacks."""
+    entity = (os.environ.get("WANDB_ENTITY") or os.environ.get("WANDB_USERNAME") or "").strip() or None
+    proj = project
+    url = None
     try:
         import wandb
 
@@ -129,11 +132,23 @@ def live_wandb_url(project: str = "beamdojo") -> str:
             url = getattr(run, "url", None)
             if not url and hasattr(run, "get_url"):
                 url = run.get_url()
-            if url:
-                return str(url)
+            ent = getattr(run, "entity", None)
+            pr = getattr(run, "project", None)
+            if ent:
+                entity = str(ent)
+            if pr:
+                proj = str(pr)
     except Exception:
         pass
-    return wandb_project_url(project)
+    if url:
+        return str(url), entity, proj
+    return wandb_project_url(proj), entity, proj
+
+
+def live_wandb_url(project: str = "beamdojo") -> str:
+    """Prefer the active W&B run URL once wandb.init has run; else the project page."""
+    url, _, _ = live_wandb_identity(project)
+    return url
 
 
 def apply_wandb_defaults(agent_cfg, args_cli) -> None:
@@ -151,15 +166,23 @@ def apply_wandb_defaults(agent_cfg, args_cli) -> None:
 
 def write_training_status(payload: dict) -> Path:
     """Write live-run JSON for Kingdom Research Lab (gitignored)."""
+    project = str(payload.get("wandb_project") or os.environ.get("WANDB_PROJECT", "beamdojo"))
+    url, entity, project = live_wandb_identity(project)
     body = {
         "updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "status": "unknown",
         "host": "lambda-a10" if Path("/lambda/nfs/beamdojo").is_dir() else "local",
-        "wandb_project": os.environ.get("WANDB_PROJECT", "beamdojo"),
-        "wandb_entity": os.environ.get("WANDB_ENTITY") or os.environ.get("WANDB_USERNAME") or None,
-        "wandb_url": live_wandb_url(os.environ.get("WANDB_PROJECT", "beamdojo")),
+        "wandb_project": project,
+        "wandb_entity": entity,
+        "wandb_url": url,
         **payload,
     }
+    # A real wandb.run URL always wins over a stale project homepage in payload.
+    if url and "/runs/" in url:
+        body["wandb_url"] = url
+        body["wandb_project"] = project
+        if entity:
+            body["wandb_entity"] = entity
     raw = json.dumps(body, indent=2) + "\n"
     targets = [REPO_ROOT / "tracking" / "training-status.json"]
     env_root = os.environ.get("BEAMDOJO_LOG_ROOT", "").strip()
@@ -176,12 +199,47 @@ def write_training_status(payload: dict) -> Path:
     return written
 
 
-def attach_status_heartbeat(runner, payload: dict, *, every: int = 10) -> None:
-    """Rewrite gitignored training-status.json every ``every`` PPO iterations.
+def _status_from_runner(runner, payload: dict, *, iteration: int | None = None) -> dict:
+    project = payload.get("wandb_project") or os.environ.get("WANDB_PROJECT", "beamdojo")
+    url, entity, project = live_wandb_identity(project)
+    it = int(iteration if iteration is not None else getattr(runner, "current_learning_iteration", 0) or 0)
+    log_dir = payload.get("log_dir")
+    ckpt = None
+    if log_dir:
+        candidate = os.path.join(str(log_dir), f"model_{it}.pt")
+        if os.path.isfile(candidate):
+            ckpt = candidate
+    payload["wandb_url"] = url
+    payload["wandb_entity"] = entity
+    payload["wandb_project"] = project
+    return {
+        **payload,
+        "status": "running",
+        "iteration": it,
+        "wandb_url": url,
+        "wandb_entity": entity,
+        "wandb_project": project,
+        "checkpoint": ckpt or payload.get("checkpoint"),
+    }
 
-    OnPolicyRunner.log is called once per iteration. Kingdom syncs this file into
-    the Research Lab; W&B remains the live metric webpage.
+
+def attach_status_heartbeat(runner, payload: dict, *, every: int = 10) -> None:
+    """Rewrite gitignored training-status.json when W&B inits and every N PPO iters.
+
+    OnPolicyRunner._prepare_logging_writer runs wandb.init at the start of learn(),
+    which is the first moment a real run URL exists. log() is called once per
+    iteration after that. Kingdom syncs this file into the Research Lab.
     """
+    orig_prepare = getattr(runner, "_prepare_logging_writer", None)
+    if callable(orig_prepare):
+
+        def _prepare(*args, **kwargs):
+            result = orig_prepare(*args, **kwargs)
+            write_training_status(_status_from_runner(runner, payload))
+            return result
+
+        runner._prepare_logging_writer = _prepare
+
     orig_log = getattr(runner, "log", None)
     if not callable(orig_log):
         return
@@ -191,22 +249,7 @@ def attach_status_heartbeat(runner, payload: dict, *, every: int = 10) -> None:
         it = int(getattr(runner, "current_learning_iteration", 0) or 0)
         if every > 0 and it % every != 0:
             return result
-        project = payload.get("wandb_project") or os.environ.get("WANDB_PROJECT", "beamdojo")
-        log_dir = payload.get("log_dir")
-        ckpt = None
-        if log_dir:
-            candidate = os.path.join(str(log_dir), f"model_{it}.pt")
-            if os.path.isfile(candidate):
-                ckpt = candidate
-        write_training_status(
-            {
-                **payload,
-                "status": "running",
-                "iteration": it,
-                "wandb_url": live_wandb_url(project),
-                "checkpoint": ckpt or payload.get("checkpoint"),
-            }
-        )
+        write_training_status(_status_from_runner(runner, payload, iteration=it))
         return result
 
     runner.log = _log

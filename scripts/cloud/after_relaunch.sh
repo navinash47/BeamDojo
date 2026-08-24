@@ -25,5 +25,11 @@ if [[ -z "${WANDB_API_KEY:-}" ]]; then
   exit 1
 fi
 
-echo "Starting Stage 1 on CUDA. Watch W&B + Kingdom Research Lab."
+STAGE="${STAGE:-1}"
+echo "Starting Stage ${STAGE} ${ROBOT:-h1} on CUDA."
+echo "Live curves: Weights & Biases (printed by train_stage*.sh)."
+echo "Kingdom Research Lab polls tracking/training-status.json — rsync that file to the Mac or open the cloud tunnel."
+if [[ "$STAGE" == "2" ]]; then
+  exec "$ROOT/train_stage2.sh"
+fi
 exec "$ROOT/train_stage1.sh"

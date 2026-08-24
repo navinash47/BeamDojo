@@ -9,6 +9,7 @@ Paper: critic 1 = dense locomotion, critic 2 = sparse foothold,
 
 from __future__ import annotations
 
+from beamdojo_mdp.advantage import W1, W2, combine_advantages, gae_advantages
 from beamdojo_mdp.foothold_extras import foothold_term_from_extras
 
 try:
@@ -147,10 +148,10 @@ class PPODoubleCritic(PPO):
         self.storage.advantages.copy_(mixed)
         self.storage.returns.copy_(r1)
 
-    def update(self):
-        loss_dict = super().update()
+    def _update_foothold_critic(self):
+        """Fit critic 2 before PPO.update() clears rollout bookkeeping."""
         if self.foot_returns is None or self.foot_optimizer is None:
-            return loss_dict
+            return None
         obs = self.storage.observations.flatten(0, 1)
         target = self.foot_returns.flatten(0, 1)
         pred = self.policy.evaluate_foothold(obs)
@@ -159,7 +160,13 @@ class PPODoubleCritic(PPO):
         extra.backward()
         nn.utils.clip_grad_norm_(self.policy.critic_foothold.parameters(), self.max_grad_norm)
         self.foot_optimizer.step()
-        loss_dict["value_foothold"] = float(extra.item())
+        return float(extra.item())
+
+    def update(self):
+        extra = self._update_foothold_critic()
+        loss_dict = super().update()
+        if extra is not None:
+            loss_dict["value_foothold"] = extra
         return loss_dict
 
 
