@@ -145,6 +145,44 @@ class TrainingStatusTests(unittest.TestCase):
         self.assertEqual(data["iteration"], 10)
         self.assertEqual(data["wandb_url"], "https://wandb.ai/x/beamdojo")
 
+    def test_heartbeat_writes_live_metrics(self):
+        rt = self.rt
+        from collections import deque
+
+        class Runner:
+            current_learning_iteration = 10
+            num_steps_per_env = 24
+
+            def log(self, locs):
+                return locs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo", "WANDB_ENTITY": "x"}, clear=True):
+                    runner = Runner()
+                    payload = {"wandb_project": "beamdojo", "num_envs": 64, "num_steps_per_env": 24}
+                    rt.attach_status_heartbeat(runner, payload, every=10)
+                    runner.log(
+                        {
+                            "rewbuffer": deque([1.0, 3.0, 5.0]),
+                            "lenbuffer": deque([8.0, 12.0]),
+                            "loss_dict": {"value_function": 0.4, "foothold_value_function": 0.2},
+                            "collection_time": 1.0,
+                            "learn_time": 1.0,
+                            "collection_size": 200,
+                        }
+                    )
+                    data = json.loads((Path(tmp) / "tracking" / "training-status.json").read_text())
+        self.assertEqual(data["status"], "running")
+        self.assertAlmostEqual(data["mean_reward"], 3.0)
+        self.assertAlmostEqual(data["mean_episode_length"], 10.0)
+        self.assertAlmostEqual(data["value_loss"], 0.4)
+        self.assertAlmostEqual(data["foothold_value_loss"], 0.2)
+        self.assertAlmostEqual(data["fps"], 100.0)
+        self.assertEqual(data["history"][-1]["iteration"], 10)
+        self.assertAlmostEqual(data["history"][-1]["mean_reward"], 3.0)
+        self.assertNotIn("rewbuffer", data)
+
     def test_prepare_logging_writer_writes_run_url(self):
         rt = self.rt
         fake = mock.MagicMock()

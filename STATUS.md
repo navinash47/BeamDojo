@@ -14,7 +14,7 @@
 - **Weights & Biases** is the webpage for live metrics. Train with `WANDB_API_KEY` in gitignored `.env.lambda`. Project: `beamdojo`. URL: `https://wandb.ai/<entity>/beamdojo` (set `WANDB_ENTITY` to make the link exact). Once a run starts, `training-status.json` prefers `wandb.run.url`.
 - Lambda does **not** expose Isaac Sim as a public site. RTX proof remains `play_beamdojo.py --video`.
 - TensorBoard: `ssh -L 6006:localhost:6006 lambda-beamdojo` then `tensorboard --logdir /lambda/nfs/beamdojo/logs`.
-- Kingdom Research Lab reads `tracking/training-status.json` (gitignored; writer in `beamdojo_runtime.write_training_status`, refreshed every 10 PPO iters). `npm run dev` polls `/live/training-status.json` every 5s. Example: `tracking/training-status.example.json`.
+- Kingdom Research Lab reads `tracking/training-status.json` (gitignored; writer in `beamdojo_runtime.write_training_status`, refreshed every 10 PPO iters with mean reward / losses / FPS). `npm run dev` polls `/live/training-status.json` every 5s and can overlay a fresh W&B summary. Example: `tracking/training-status.example.json`.
 
 ## Notes
 - Official BeamDojo training code was never released. This is an Isaac Lab recreation.

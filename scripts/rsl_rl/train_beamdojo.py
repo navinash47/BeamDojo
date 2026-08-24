@@ -202,6 +202,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
         "terrain": args_cli.terrain,
         "task": args_cli.task,
         "num_envs": int(env_cfg.scene.num_envs),
+        "num_steps_per_env": int(getattr(agent_cfg, "num_steps_per_env", 0) or 0),
         "max_iterations": int(agent_cfg.max_iterations),
         "logger": getattr(agent_cfg, "logger", "tensorboard"),
         "wandb_project": getattr(agent_cfg, "wandb_project", "beamdojo"),

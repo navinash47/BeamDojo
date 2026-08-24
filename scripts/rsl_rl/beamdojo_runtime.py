@@ -9,8 +9,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+_SCRIPTS = Path(__file__).resolve().parent
+for _path in (REPO_ROOT, _SCRIPTS):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
+
+from live_metrics import append_history, extract_live_metrics
 
 _REGISTERED = False
 
@@ -249,6 +253,16 @@ def attach_status_heartbeat(runner, payload: dict, *, every: int = 10) -> None:
         it = int(getattr(runner, "current_learning_iteration", 0) or 0)
         if every > 0 and it % every != 0:
             return result
+        locs = args[0] if args else kwargs.get("locs")
+        metrics = extract_live_metrics(
+            locs if isinstance(locs, dict) else {},
+            num_envs=int(payload.get("num_envs") or 0),
+            num_steps=int(
+                getattr(runner, "num_steps_per_env", 0) or payload.get("num_steps_per_env") or 0
+            ),
+        )
+        payload.update(metrics)
+        append_history(payload, metrics, it)
         write_training_status(_status_from_runner(runner, payload, iteration=it))
         return result
 

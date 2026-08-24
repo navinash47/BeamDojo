@@ -15,7 +15,7 @@ Lambda does not serve Isaac Sim on the public internet. Watch a run from the Mac
 
 1. **Weights & Biases** (preferred): `WANDB_API_KEY` in `.env.lambda`, train with `--logger wandb --log_project_name beamdojo`. Open `https://wandb.ai/<entity>/beamdojo`.
 2. **TensorBoard tunnel:** `ssh -L 6006:localhost:6006 lambda-beamdojo` then `tensorboard --logdir /lambda/nfs/beamdojo/logs --bind_all`.
-3. **Kingdom Research Lab** (`/?tab=research`): syncs `tracking/training-status.json` (gitignored; see the example file) plus proof mp4s. `npm run dev` also polls `/live/training-status.json` every 5s from the BeamDojo checkout.
+3. **Kingdom Research Lab** (`/?tab=research`): syncs `tracking/training-status.json` (gitignored; see the example file) plus proof mp4s. `npm run dev` also polls `/live/training-status.json` every 5s from the BeamDojo checkout (and a fresh W&B heartbeat if `WANDB_API_KEY` is present). The live card shows mean reward / losses from that snapshot; full curves stay on W&B.
 
 `scripts/cloud/train_stage1.sh` writes that status JSON (and refreshes it every 10 PPO iters) and prints the W&B URL.
 
