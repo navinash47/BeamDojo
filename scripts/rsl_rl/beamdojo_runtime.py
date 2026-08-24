@@ -226,9 +226,20 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
             terrain.terrain_generator = None
         if hasattr(terrain, "debug_vis"):
             terrain.debug_vis = False
+        # Parent rough importer carries a Nucleus marble MDL; plane spawn does not need it.
+        if getattr(terrain, "visual_material", None) is not None:
+            terrain.visual_material = None
+
+    sky = getattr(scene, "sky_light", None) if scene is not None else None
+    spawn = getattr(sky, "spawn", None)
+    if spawn is not None and getattr(spawn, "texture_file", None):
+        print("[WARN] Clearing Nucleus HDR sky so headless gym.make does not block before W&B.")
+        spawn.texture_file = None
 
     obs = getattr(env_cfg, "observations", None)
     policy = getattr(obs, "policy", None)
+    if policy is not None and hasattr(policy, "concatenate_terms"):
+        policy.concatenate_terms = True
     if policy is not None and parent_raycast_height_scan(getattr(policy, "height_scan", None)):
         print("[WARN] Replacing parent mdp.height_scan with task_height_scan.")
         _install_task_height_scan(policy)

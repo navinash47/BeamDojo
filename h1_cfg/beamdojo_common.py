@@ -267,6 +267,14 @@ def apply_shared_locomotion(cfg, spec: RobotSpec, *, stage: int) -> None:
         cfg.commands.base_velocity.debug_vis = False
         # Parent ANYmal heading target yaws the robot off a 20 cm imagined/real beam.
         cfg.commands.base_velocity.heading_command = False
+        # ActorCritic 3.0.1 asserts each obs group is 2D ([N, dim]).
+        if hasattr(cfg.observations, "policy"):
+            cfg.observations.policy.concatenate_terms = True
+        # Parent sky uses a Nucleus HDR; a miss hangs gym.make before wandb.init.
+        sky = getattr(cfg.scene, "sky_light", None)
+        spawn = getattr(sky, "spawn", None)
+        if spawn is not None and getattr(spawn, "texture_file", None):
+            spawn.texture_file = None
 
     start_w = BEAM_WIDTH_HARD if stage == 1 else BEAM_WIDTH_EASY
     cfg.events.init_beamdojo = EventTerm(

@@ -753,11 +753,21 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
                                 "terrain_generator": object(),
                                 "debug_vis": True,
                                 "physics_material": "walk",
+                                "visual_material": "nucleus-mdl",
                             },
-                        )()
+                        )(),
+                        "sky_light": type(
+                            "Sky",
+                            (),
+                            {"spawn": type("Spawn", (), {"texture_file": "/nucleus/sky.hdr"})()},
+                        )(),
                     },
                 )(),
-                "observations": None,
+                "observations": type(
+                    "Obs",
+                    (),
+                    {"policy": type("Pol", (), {"concatenate_terms": False, "height_scan": None})()},
+                )(),
                 "commands": None,
                 "sim": type("Sim", (), {"physics_material": "old"})(),
             },
@@ -766,6 +776,9 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertEqual(cfg.scene.terrain.terrain_type, "plane")
         self.assertIsNone(cfg.scene.terrain.terrain_generator)
         self.assertFalse(cfg.scene.terrain.debug_vis)
+        self.assertIsNone(cfg.scene.terrain.visual_material)
+        self.assertIsNone(cfg.scene.sky_light.spawn.texture_file)
+        self.assertTrue(cfg.observations.policy.concatenate_terms)
         self.assertEqual(cfg.sim.physics_material, "walk")
 
     def test_reassert_replaces_parent_height_scan_without_isaac(self):

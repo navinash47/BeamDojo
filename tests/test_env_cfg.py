@@ -71,6 +71,8 @@ class EnvCfgContractTests(unittest.TestCase):
         self.assertIn("debug_vis = False", common)
         shared = common.split("def apply_stage1")[0]
         self.assertIn("heading_command = False", shared)
+        self.assertIn("concatenate_terms = True", shared)
+        self.assertIn("texture_file = None", shared)
         self.assertIn("cfg.scene.height_scanner = None", common)
         self.assertIn("cfg.sim.physics_material = cfg.scene.terrain.physics_material", common)
         self.assertNotIn("RayCasterCfg", common)
