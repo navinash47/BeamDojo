@@ -43,16 +43,19 @@ def _loss_scalars(loss_dict: Any) -> dict[str, float]:
     if not isinstance(loss_dict, dict):
         return {}
     mapping = {
-        "value_function": "value_loss",
-        "surrogate": "surrogate_loss",
-        "entropy": "entropy",
-        "foothold_value_function": "foothold_value_loss",
+        "value_loss": ("value_function", "value_loss"),
+        "surrogate_loss": ("surrogate", "surrogate_loss"),
+        "entropy": ("entropy",),
+        # PPODoubleCritic.update() writes value_foothold; rsl-rl PPO uses value_function.
+        "foothold_value_loss": ("value_foothold", "foothold_value_function", "foothold_value_loss"),
     }
     out: dict[str, float] = {}
-    for src, dest in mapping.items():
-        number = _finite(loss_dict.get(src))
-        if number is not None:
-            out[dest] = number
+    for dest, sources in mapping.items():
+        for src in sources:
+            number = _finite(loss_dict.get(src))
+            if number is not None:
+                out[dest] = number
+                break
     return out
 
 

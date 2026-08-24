@@ -53,6 +53,10 @@ class LiveMetricsTests(unittest.TestCase):
         metrics = self.m.extract_live_metrics({"rewbuffer": deque(), "lenbuffer": []})
         self.assertEqual(metrics, {})
 
+    def test_reads_double_critic_value_foothold_key(self):
+        metrics = self.m.extract_live_metrics({"loss_dict": {"value_foothold": 0.22}})
+        self.assertAlmostEqual(metrics["foothold_value_loss"], 0.22)
+
     def test_skips_non_finite_and_non_scalars(self):
         metrics = self.m.extract_live_metrics(
             {
