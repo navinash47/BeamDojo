@@ -9,7 +9,7 @@ Paper: critic 1 = dense locomotion, critic 2 = sparse foothold,
 
 from __future__ import annotations
 
-from beamdojo_mdp.advantage import W1, W2, combine_advantages, gae_advantages
+from beamdojo_mdp.foothold_extras import foothold_term_from_extras
 
 try:
     import torch
@@ -164,11 +164,7 @@ class PPODoubleCritic(PPO):
 
 
 def _foothold_from_extras(extras, rewards):
-    if extras is None:
-        return torch.zeros_like(rewards)
-    foot = extras.get("foothold_reward")
-    if foot is None and isinstance(extras.get("log"), dict):
-        foot = extras["log"].get("foothold_reward")
+    foot = foothold_term_from_extras(extras)
     if foot is None:
         return torch.zeros_like(rewards)
     if not torch.is_tensor(foot):

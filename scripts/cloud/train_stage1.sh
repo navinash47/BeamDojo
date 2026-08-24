@@ -9,7 +9,11 @@ ROBOT="${ROBOT:-h1}"
 LOGGER_ARGS=(--logger tensorboard)
 if [[ -n "${WANDB_API_KEY:-}" ]]; then
   LOGGER_ARGS=(--logger wandb --log_project_name "${WANDB_PROJECT:-beamdojo}")
-  echo "W&B project ${WANDB_PROJECT:-beamdojo} — open https://wandb.ai (set WANDB_ENTITY for a direct link)."
+  if [[ -n "${WANDB_ENTITY:-}" ]]; then
+    echo "W&B: https://wandb.ai/${WANDB_ENTITY}/${WANDB_PROJECT:-beamdojo}"
+  else
+    echo "W&B project ${WANDB_PROJECT:-beamdojo} — open https://wandb.ai (set WANDB_ENTITY for a direct link)."
+  fi
 else
   echo "WANDB_API_KEY unset; TensorBoard only. ssh -L 6006:localhost:6006 lambda-beamdojo"
 fi

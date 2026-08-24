@@ -143,6 +143,30 @@ class TrainingStatusTests(unittest.TestCase):
         self.assertEqual(data["status"], "idle")
         self.assertEqual(data["note"], "unit idle")
 
+    def test_wrapper_writes_log_and_top_level_foothold(self):
+        rt = self.rt
+
+        class Vec(list):
+            def __mul__(self, other):
+                return Vec(x * other for x in self)
+
+        class Env:
+            unwrapped = None
+            beamdojo_foothold_step = Vec([-3.0, -1.0])
+            step_dt = 0.02
+
+            def __init__(self):
+                self.unwrapped = self
+
+            def step(self, _action):
+                return (None, None, None, None, {"log": {}})
+
+        env = Env()
+        wrapped = rt.FootholdExtrasWrapper(env)
+        info = wrapped.step(None)[-1]
+        self.assertEqual(info["foothold_reward"], [-0.06, -0.02])
+        self.assertEqual(info["log"]["foothold_penalty"], [-0.06, -0.02])
+
 
 class GymIdSourceTests(unittest.TestCase):
     def test_cfg_files_register_expected_ids(self):

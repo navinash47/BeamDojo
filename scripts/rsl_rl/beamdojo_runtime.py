@@ -257,10 +257,16 @@ class FootholdExtrasWrapper:
             return result
         dt = float(getattr(raw, "step_dt", 0.02) or 0.02)
         contrib = foot * dt
-        # gymnasium 5-tuple or rsl-rl 4-tuple
         info = result[-1]
         if isinstance(info, dict):
             info["foothold_reward"] = contrib
+            info["foothold_penalty"] = contrib
+            log = info.get("log")
+            if not isinstance(log, dict):
+                log = {}
+                info["log"] = log
+            log["foothold_reward"] = contrib
+            log["foothold_penalty"] = contrib
         return result
 
     def reset(self, *args, **kwargs):
