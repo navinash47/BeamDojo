@@ -312,6 +312,7 @@ class TrainingStatusTests(unittest.TestCase):
         self.assertEqual(data["status"], "running")
         self.assertEqual(data["wandb_url"], "https://wandb.ai/x/beamdojo/runs/live1")
         self.assertEqual(data["wandb_entity"], "x")
+        self.assertIn("W&B run URL", data["note"])
 
     def test_prepare_falls_back_when_wandb_init_fails(self):
         rt = self.rt
@@ -340,6 +341,8 @@ class TrainingStatusTests(unittest.TestCase):
                         fallback.assert_called_once_with(runner)
                     data = json.loads((Path(tmp) / "tracking" / "training-status.json").read_text())
         self.assertEqual(data["status"], "running")
+        self.assertIn("TensorBoard", data["note"])
+        self.assertNotIn("/runs/", data.get("wandb_url") or "")
 
     def test_prepare_keeps_writer_when_post_init_fails(self):
         rt = self.rt
@@ -502,6 +505,33 @@ class TrainingStatusTests(unittest.TestCase):
         self.assertIn('"log_config", orig_log_config', text)
         self.assertIn("def sanitize_ep_infos_for_rsl_log", text)
         self.assertIn("def _patch_runner_log_ep_infos", text)
+        self.assertIn("def retry_call", text)
+        self.assertIn("def _patch_wandb_init_retry", text)
+        self.assertIn("def _apply_live_run_note", text)
+
+    def test_retry_call_succeeds_after_transient_failures(self):
+        n = {"i": 0}
+
+        def flaky():
+            n["i"] += 1
+            if n["i"] < 3:
+                raise RuntimeError("http 503")
+            return "ok"
+
+        slept = []
+        self.assertEqual(
+            self.rt.retry_call(flaky, attempts=3, label="wandb.init", sleeper=slept.append),
+            "ok",
+        )
+        self.assertEqual(n["i"], 3)
+        self.assertEqual(len(slept), 2)
+
+    def test_retry_call_raises_after_attempts(self):
+        def boom():
+            raise RuntimeError("nope")
+
+        with self.assertRaises(RuntimeError):
+            self.rt.retry_call(boom, attempts=2, label="wandb.init", sleeper=lambda _s: None)
 
     def test_wrapper_writes_log_and_top_level_foothold(self):
         rt = self.rt
@@ -766,7 +796,17 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
                 "observations": type(
                     "Obs",
                     (),
-                    {"policy": type("Pol", (), {"concatenate_terms": False, "height_scan": None})()},
+                    {
+                        "policy": type(
+                            "Pol",
+                            (),
+                            {
+                                "concatenate_terms": False,
+                                "flatten_history_dim": False,
+                                "height_scan": None,
+                            },
+                        )()
+                    },
                 )(),
                 "commands": None,
                 "sim": type("Sim", (), {"physics_material": "old"})(),
@@ -779,6 +819,7 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertIsNone(cfg.scene.terrain.visual_material)
         self.assertIsNone(cfg.scene.sky_light.spawn.texture_file)
         self.assertTrue(cfg.observations.policy.concatenate_terms)
+        self.assertTrue(cfg.observations.policy.flatten_history_dim)
         self.assertEqual(cfg.sim.physics_material, "walk")
 
     def test_reassert_replaces_parent_height_scan_without_isaac(self):
@@ -859,6 +900,9 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("Could not dump cfg yaml", train)
         self.assertIn("reassert_gpu_env_cfg(env_cfg)", train)
         self.assertLess(train.index("reassert_gpu_env_cfg(env_cfg)"), train.index("gym.make("))
+        self.assertIn("Not a live W&B run yet", train)
+        self.assertIn('"status": "unknown"', train)
+        self.assertNotIn('{**status_body, "status": "running", "iteration": 0}', train)
         runtime = (root / "scripts" / "rsl_rl" / "beamdojo_runtime.py").read_text()
         self.assertIn("def _patch_hydra_none_from_dict", runtime)
         self.assertIn("_patch_hydra_none_from_dict()", runtime)
@@ -866,6 +910,7 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("WANDB_USERNAME", env_sh)
         self.assertIn("WANDB_ENTITY", env_sh)
         self.assertIn('WANDB_PROJECT="${WANDB_PROJECT:-beamdojo}"', env_sh)
+        self.assertIn("WANDB_INIT_TIMEOUT", env_sh)
         play = (root / "scripts" / "rsl_rl" / "play_beamdojo.py").read_text()
         self.assertIn("pick_play_checkpoint", play)
         self.assertIn("beamdojo_runtime.runner_cfg_dict(agent_cfg)", play)
@@ -887,6 +932,7 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("_patch_store_code_state", relaunch)
         self.assertIn("sanitize_ep_infos_for_rsl_log", relaunch)
         self.assertIn("reassert_gpu_env_cfg", relaunch)
+        self.assertIn("_patch_wandb_init_retry", relaunch)
         self.assertIn('checkout -f -B "$REF" "origin/${REF}"', relaunch)
         self.assertIn("Never git clean", relaunch)
         self.assertNotIn("git clean", relaunch.replace("Never git clean", ""))

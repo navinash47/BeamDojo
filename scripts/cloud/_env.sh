@@ -19,5 +19,8 @@ if [[ -z "${WANDB_USERNAME:-}" ]]; then
   unset WANDB_USERNAME || true
 fi
 export WANDB_PROJECT="${WANDB_PROJECT:-beamdojo}"
+# First wandb.init on a cold Lambda often exceeds the 90s default.
+export WANDB_INIT_TIMEOUT="${WANDB_INIT_TIMEOUT:-180}"
+export WANDB_HTTP_TIMEOUT="${WANDB_HTTP_TIMEOUT:-60}"
 export PYTHONPATH="/workspace/beamdojo:/workspace/isaaclab/source/isaaclab:/workspace/isaaclab/source/isaaclab_assets:/workspace/isaaclab/source/isaaclab_tasks:/workspace/isaaclab/source/isaaclab_rl:${PYTHONPATH:-}"
 cd /workspace/beamdojo/scripts/rsl_rl

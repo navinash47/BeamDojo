@@ -51,6 +51,10 @@ if ! grep -q "def reassert_gpu_env_cfg" "$REPO/scripts/rsl_rl/beamdojo_runtime.p
   echo "beamdojo_runtime.py is missing Hydra leftover reassert. Pull ${REF} or a restored ANYmal RayCaster / mdp.height_scan crashes gym.make." >&2
   exit 1
 fi
+if ! grep -q "def _patch_wandb_init_retry" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing wandb.init retry. Pull ${REF} or a single Lambda 503 falls back to TensorBoard with no live W&B page." >&2
+  exit 1
+fi
 if ! grep -q "def apply_physx_gpu_capacity" "$REPO/h1_cfg/beamdojo_common.py"; then
   echo "beamdojo_common.py is missing PhysX GPU buffer bump. Pull ${REF} or cloned beams/stones overflow contact buffers." >&2
   exit 1

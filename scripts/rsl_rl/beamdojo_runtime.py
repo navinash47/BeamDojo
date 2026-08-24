@@ -240,6 +240,9 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     policy = getattr(obs, "policy", None)
     if policy is not None and hasattr(policy, "concatenate_terms"):
         policy.concatenate_terms = True
+    if policy is not None and hasattr(policy, "flatten_history_dim"):
+        # History left unflattened is 3D; ActorCritic 3.0.1 asserts 2D groups.
+        policy.flatten_history_dim = True
     if policy is not None and parent_raycast_height_scan(getattr(policy, "height_scan", None)):
         print("[WARN] Replacing parent mdp.height_scan with task_height_scan.")
         _install_task_height_scan(policy)
@@ -397,6 +400,7 @@ def inject_double_critic() -> None:
     _patch_store_code_state(opr)
     _patch_hydra_none_from_dict()
     sync_wandb_identity_env()
+    _patch_wandb_init_retry()
     _patch_wandb_writer()
 
 
@@ -546,6 +550,65 @@ def sync_wandb_identity_env() -> None:
         os.environ["WANDB_PROJECT"] = "beamdojo"
 
 
+def retry_call(fn, *args, attempts: int = 3, label: str = "call", sleeper=None, **kwargs):
+    """Retry transient Lambda / W&B HTTP. ``sleeper`` is injectable for tests."""
+    import time
+
+    pause = sleeper if sleeper is not None else time.sleep
+    if attempts < 1:
+        raise ValueError("attempts must be >= 1")
+    last: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            last = exc
+            print(
+                f"[WARN] {label} attempt {attempt}/{attempts} failed "
+                f"({type(exc).__name__}: {exc})"
+            )
+            if attempt < attempts:
+                pause(min(16.0, float(2**attempt)))
+    assert last is not None
+    raise last
+
+
+def _patch_wandb_init_retry() -> None:
+    """rsl-rl 3.0.1 ``WandbSummaryWriter`` calls ``wandb.init`` once.
+
+    A single 503/timeout on Lambda falls through to TensorBoard and the 10k
+    CUDA run never gets a ``wandb.run.url`` for Research Lab / W&B.
+    """
+    try:
+        import wandb
+    except Exception:
+        return
+    orig = getattr(wandb, "init", None)
+    if not callable(orig) or getattr(orig, "_beamdojo_retry", False):
+        return
+
+    def init(*args, **kwargs):
+        sync_wandb_identity_env()
+        if kwargs.get("entity") == "":
+            kwargs["entity"] = None
+
+        def attempt():
+            try:
+                import wandb as wb
+
+                existing = getattr(wb, "run", None)
+                if existing is not None:
+                    return existing
+            except Exception:
+                pass
+            return orig(*args, **kwargs)
+
+        return retry_call(attempt, attempts=3, label="wandb.init")
+
+    init._beamdojo_retry = True
+    wandb.init = init
+
+
 def _keep_wandb_call(label: str, fn, *args, **kwargs):
     """W&B I/O must not abort PPO after Isaac boot (transient HTTP / JSON)."""
     try:
@@ -686,6 +749,7 @@ def _patch_wandb_writer() -> None:
         from rsl_rl.utils.wandb_utils import WandbSummaryWriter
     except Exception:
         return
+    _patch_wandb_init_retry()
     _patch_wandb_config_update()
     if getattr(WandbSummaryWriter, "_beamdojo_keep_alive", False):
         return
@@ -696,9 +760,10 @@ def _patch_wandb_writer() -> None:
     orig_save_file = getattr(WandbSummaryWriter, "save_file", None)
     orig_save_model = getattr(WandbSummaryWriter, "save_model", None)
 
-    def __init__(self, log_dir, flush_secs, cfg):
+    def __init__(self, *args, **kwargs):
+        sync_wandb_identity_env()
         try:
-            orig_init(self, log_dir, flush_secs, cfg)
+            orig_init(self, *args, **kwargs)
             return
         except Exception as exc:
             print(
@@ -892,6 +957,27 @@ def _status_from_runner(runner, payload: dict, *, iteration: int | None = None) 
     }
 
 
+def _apply_live_run_note(payload: dict, runner) -> None:
+    """Replace the Isaac-boot note once learn() has opened a logger."""
+    url, _, _ = live_wandb_identity(str(payload.get("wandb_project") or "beamdojo"))
+    if url and "/runs/" in url:
+        payload["note"] = (
+            "Live CUDA train. Open the W&B run URL for curves. "
+            "Research Lab shows the last PPO snapshot every 10 iters."
+        )
+        return
+    logger = str(payload.get("logger") or getattr(runner, "logger_type", None) or "")
+    if logger == "tensorboard":
+        payload["note"] = (
+            "CUDA train running with TensorBoard after W&B logger setup failed. "
+            "No live W&B run URL. ssh -L 6006:localhost:6006 and open NFS logs."
+        )
+        return
+    payload["note"] = (
+        "CUDA train running. No wandb.run URL yet — W&B project page or TensorBoard only."
+    )
+
+
 def attach_status_heartbeat(runner, payload: dict, *, every: int = 10) -> None:
     """Rewrite gitignored training-status.json when W&B inits and every N PPO iters.
 
@@ -918,6 +1004,8 @@ def attach_status_heartbeat(runner, payload: dict, *, every: int = 10) -> None:
                         "Falling back to TensorBoard so the 10k run still starts."
                     )
                     result = _fallback_tensorboard_writer(runner)
+                    payload["logger"] = "tensorboard"
+            _apply_live_run_note(payload, runner)
             _safe_training_status(_status_from_runner(runner, payload))
             return result
 

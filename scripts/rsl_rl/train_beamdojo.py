@@ -212,7 +212,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
     }
     beamdojo_runtime.install_status_signal_hooks(status_body)
     status_path = beamdojo_runtime.write_training_status(
-        {**status_body, "status": "running", "iteration": 0}
+        {
+            **status_body,
+            "status": "unknown",
+            "iteration": 0,
+            "note": (
+                "Isaac Lab gym.make / runner init on CUDA. Not a live W&B run yet — "
+                "status becomes running when learn() opens the logger."
+            ),
+        }
     )
     print(f"[INFO] Wrote training status: {status_path}")
 
@@ -284,7 +292,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
             getattr(agent_cfg, "wandb_project", "beamdojo")
         )
         it0 = int(getattr(runner, "current_learning_iteration", 0) or 0)
-        beamdojo_runtime.write_training_status({**status_body, "status": "running", "iteration": it0})
+        beamdojo_runtime.write_training_status(
+            {
+                **status_body,
+                "status": "unknown",
+                "iteration": it0,
+                "note": (
+                    "Runner constructed. learn() will call wandb.init next; "
+                    "Research Lab flips to running when that heartbeat lands."
+                ),
+            }
+        )
         beamdojo_runtime.attach_status_heartbeat(runner, status_body, every=10)
 
         remaining = beamdojo_runtime.remaining_learning_iterations(it0, agent_cfg.max_iterations)
