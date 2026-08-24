@@ -643,6 +643,178 @@ class RunnerCfgSanitizeTests(unittest.TestCase):
         self.assertIsNone(out["algorithm"]["symmetry_cfg"])
 
 
+class ReassertGpuEnvCfgTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.rt = _load_runtime()
+
+    def test_parent_raycast_height_scan_detects_func_and_sensor(self):
+        rt = self.rt
+
+        class Func:
+            __name__ = "height_scan"
+
+        class Term:
+            func = Func()
+            params = {"sensor_cfg": {"name": "robot"}}
+
+        self.assertTrue(rt.parent_raycast_height_scan(Term()))
+
+        class TaskFunc:
+            __name__ = "task_height_scan"
+
+        class ParentSensor:
+            name = "height_scanner"
+
+        leftover = type("T", (), {"func": TaskFunc(), "params": {"sensor_cfg": ParentSensor()}})()
+        self.assertTrue(rt.parent_raycast_height_scan(leftover))
+        ok = type("T", (), {"func": TaskFunc(), "params": {"sensor_cfg": {"name": "robot"}}})()
+        self.assertFalse(rt.parent_raycast_height_scan(ok))
+        self.assertFalse(rt.parent_raycast_height_scan(None))
+
+    def test_reassert_clears_scanner_commands_and_physics_material(self):
+        plane_mat = object()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": object(),
+                        "terrain": type(
+                            "Terrain",
+                            (),
+                            {
+                                "terrain_type": "plane",
+                                "terrain_generator": None,
+                                "debug_vis": False,
+                                "physics_material": plane_mat,
+                            },
+                        )(),
+                    },
+                )(),
+                "observations": type(
+                    "Obs",
+                    (),
+                    {
+                        "policy": type(
+                            "Pol",
+                            (),
+                            {
+                                "height_scan": type(
+                                    "T",
+                                    (),
+                                    {
+                                        "func": type("F", (), {"__name__": "task_height_scan"})(),
+                                        "params": {"sensor_cfg": {"name": "robot"}},
+                                    },
+                                )()
+                            },
+                        )()
+                    },
+                )(),
+                "commands": type(
+                    "Cmd",
+                    (),
+                    {
+                        "base_velocity": type(
+                            "Vel",
+                            (),
+                            {"debug_vis": True, "heading_command": True},
+                        )()
+                    },
+                )(),
+                "sim": type("Sim", (), {"physics_material": object()})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNone(cfg.scene.height_scanner)
+        self.assertFalse(cfg.commands.base_velocity.debug_vis)
+        self.assertFalse(cfg.commands.base_velocity.heading_command)
+        self.assertIs(cfg.sim.physics_material, plane_mat)
+
+    def test_reassert_flattens_generator_terrain(self):
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": type(
+                            "Terrain",
+                            (),
+                            {
+                                "terrain_type": "generator",
+                                "terrain_generator": object(),
+                                "debug_vis": True,
+                                "physics_material": "walk",
+                            },
+                        )()
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": type("Sim", (), {"physics_material": "old"})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(cfg.scene.terrain.terrain_type, "plane")
+        self.assertIsNone(cfg.scene.terrain.terrain_generator)
+        self.assertFalse(cfg.scene.terrain.debug_vis)
+        self.assertEqual(cfg.sim.physics_material, "walk")
+
+    def test_reassert_replaces_parent_height_scan_without_isaac(self):
+        called = []
+
+        class Policy:
+            height_scan = type(
+                "T",
+                (),
+                {
+                    "func": type("F", (), {"__name__": "height_scan"})(),
+                    "params": {"sensor_cfg": {"name": "height_scanner"}},
+                },
+            )()
+
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None})(),
+                "observations": type("Obs", (), {"policy": Policy()})(),
+                "commands": None,
+                "sim": None,
+            },
+        )()
+
+        def fake_install(policy):
+            called.append(policy)
+            policy.height_scan = "task"
+
+        with mock.patch.object(self.rt, "_install_task_height_scan", fake_install):
+            self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(called, [cfg.observations.policy])
+        self.assertEqual(cfg.observations.policy.height_scan, "task")
+
+    def test_none_safe_from_dict_skips_none_target(self):
+        seen = []
+
+        def orig(obj, data, _ns=""):
+            seen.append((obj, data, _ns))
+            return "ok"
+
+        wrapped = self.rt._none_safe_update_class_from_dict(orig)
+        self.assertIsNone(wrapped(None, {"prim_path": "/World/ground"}, _ns="/scene/height_scanner"))
+        self.assertEqual(seen, [])
+        self.assertEqual(wrapped({"a": 1}, {"a": 2}, _ns="/x"), "ok")
+        self.assertEqual(seen, [({"a": 1}, {"a": 2}, "/x")])
+
+
 class GymIdSourceTests(unittest.TestCase):
     def test_cfg_files_register_expected_ids(self):
         root = Path(__file__).resolve().parents[1]
@@ -672,6 +844,11 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("current_learning_iteration = 0", train)
         self.assertIn("remaining_learning_iterations", train)
         self.assertIn("Could not dump cfg yaml", train)
+        self.assertIn("reassert_gpu_env_cfg(env_cfg)", train)
+        self.assertLess(train.index("reassert_gpu_env_cfg(env_cfg)"), train.index("gym.make("))
+        runtime = (root / "scripts" / "rsl_rl" / "beamdojo_runtime.py").read_text()
+        self.assertIn("def _patch_hydra_none_from_dict", runtime)
+        self.assertIn("_patch_hydra_none_from_dict()", runtime)
         env_sh = (root / "scripts" / "cloud" / "_env.sh").read_text()
         self.assertIn("WANDB_USERNAME", env_sh)
         self.assertIn("WANDB_ENTITY", env_sh)
@@ -679,6 +856,8 @@ class GymIdSourceTests(unittest.TestCase):
         play = (root / "scripts" / "rsl_rl" / "play_beamdojo.py").read_text()
         self.assertIn("pick_play_checkpoint", play)
         self.assertIn("beamdojo_runtime.runner_cfg_dict(agent_cfg)", play)
+        self.assertIn("reassert_gpu_env_cfg(env_cfg)", play)
+        self.assertLess(play.index("reassert_gpu_env_cfg(env_cfg)"), play.index("gym.make("))
         self.assertIn("beamdojo_runtime.runner_cfg_dict(agent_cfg)", train)
         self.assertNotIn("OnPolicyRunner(env, agent_cfg.to_dict()", train)
         self.assertNotIn("OnPolicyRunner(env, agent_cfg.to_dict()", play)
@@ -694,6 +873,10 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("sanitize_rsl_rl_train_cfg", relaunch)
         self.assertIn("_patch_store_code_state", relaunch)
         self.assertIn("sanitize_ep_infos_for_rsl_log", relaunch)
+        self.assertIn("reassert_gpu_env_cfg", relaunch)
+        self.assertIn('checkout -f -B "$REF" "origin/${REF}"', relaunch)
+        self.assertIn("Never git clean", relaunch)
+        self.assertNotIn("git clean", relaunch.replace("Never git clean", ""))
         self.assertIn("safe.directory", relaunch)
         self.assertIn("apply_physx_gpu_capacity", relaunch)
         self.assertIn("PHYSX_PATCH_COUNT_BEAM", relaunch)

@@ -159,6 +159,130 @@ def runner_cfg_dict(agent_cfg) -> dict:
     return sanitize_rsl_rl_train_cfg(cfg)
 
 
+def _sensor_cfg_name(sensor) -> str:
+    if sensor is None:
+        return ""
+    name = getattr(sensor, "name", None)
+    if name:
+        return str(name)
+    if isinstance(sensor, dict):
+        return str(sensor.get("name") or "")
+    return ""
+
+
+def parent_raycast_height_scan(term) -> bool:
+    """True when ``observations.policy.height_scan`` still needs ``scene.height_scanner``."""
+    if term is None:
+        return False
+    func = getattr(term, "func", None)
+    if getattr(func, "__name__", "") == "height_scan":
+        return True
+    params = getattr(term, "params", None)
+    sensor = None
+    if isinstance(params, dict):
+        sensor = params.get("sensor_cfg")
+    elif params is not None:
+        sensor = getattr(params, "sensor_cfg", None)
+    return _sensor_cfg_name(sensor) == "height_scanner"
+
+
+def _install_task_height_scan(policy) -> None:
+    """Swap parent ``mdp.height_scan`` for the dual-terrain task map. Isaac-only."""
+    from isaaclab.managers import ObservationTermCfg as ObsTerm
+    from isaaclab.managers import SceneEntityCfg
+
+    from h1_cfg.mdp import task_height_scan
+
+    policy.height_scan = ObsTerm(
+        func=task_height_scan,
+        params={"sensor_cfg": SceneEntityCfg("robot"), "offset": 0.5, "grid_n": 15, "extent": 1.4},
+        clip=(-1.0, 1.0),
+    )
+
+
+def reassert_gpu_env_cfg(env_cfg) -> None:
+    """Undo parent / Hydra leftovers that crash ``gym.make`` on the A10.
+
+    ``LocomotionVelocityRoughEnvCfg.__post_init__`` runs *before* ``apply_stage1``
+    and copies the rough-generator material onto ``sim.physics_material``. Isaac
+    Lab 2.3.2 ``hydra_task_config`` then ``from_dict``s CLI/compose onto that
+    instance. A leftover ANYmal RayCaster plus ``mdp.height_scan`` looks up
+    ``scene['height_scanner']`` on the first observation.
+    """
+    scene = getattr(env_cfg, "scene", None)
+    if scene is not None and getattr(scene, "height_scanner", None) is not None:
+        print(
+            "[WARN] Clearing leftover scene.height_scanner (ANYmal RayCaster). "
+            "Policy scan is task_height_scan."
+        )
+        scene.height_scanner = None
+
+    terrain = getattr(scene, "terrain", None) if scene is not None else None
+    if terrain is not None:
+        if getattr(terrain, "terrain_type", None) != "plane":
+            print("[WARN] Forcing terrain_type=plane (parent rough generator leftover).")
+            terrain.terrain_type = "plane"
+        if getattr(terrain, "terrain_generator", None) is not None:
+            terrain.terrain_generator = None
+        if hasattr(terrain, "debug_vis"):
+            terrain.debug_vis = False
+
+    obs = getattr(env_cfg, "observations", None)
+    policy = getattr(obs, "policy", None)
+    if policy is not None and parent_raycast_height_scan(getattr(policy, "height_scan", None)):
+        print("[WARN] Replacing parent mdp.height_scan with task_height_scan.")
+        _install_task_height_scan(policy)
+
+    commands = getattr(env_cfg, "commands", None)
+    base_velocity = getattr(commands, "base_velocity", None)
+    if base_velocity is not None:
+        if hasattr(base_velocity, "debug_vis"):
+            base_velocity.debug_vis = False
+        if hasattr(base_velocity, "heading_command"):
+            base_velocity.heading_command = False
+
+    sim = getattr(env_cfg, "sim", None)
+    mat = getattr(terrain, "physics_material", None) if terrain is not None else None
+    if sim is not None and mat is not None:
+        sim.physics_material = mat
+
+
+def _none_safe_update_class_from_dict(orig):
+    """Leave ``None`` attributes None instead of recursing into a Hydra mapping."""
+
+    def update_class_from_dict(obj, data, _ns=""):
+        if obj is None:
+            return None
+        return orig(obj, data, _ns=_ns)
+
+    return update_class_from_dict
+
+
+def _patch_hydra_none_from_dict() -> None:
+    """Isaac Lab 2.3.2 ``from_dict`` KeyErrors when the instance field is None.
+
+    ``update_class_from_dict(None, {prim_path: ...})`` walks attributes of
+    ``None`` and raises. That happens if Hydra compose/CLI supplies a nested
+    dict for a field ``apply_stage*`` already nulled (``height_scanner``,
+    ``undesired_contacts``, ``rnd_cfg``). Aborting here skips ``gym.make`` and
+    W&B. Keeping None is the BeamDojo value; ``reassert_gpu_env_cfg`` still
+    clears leftovers that were not None.
+    """
+    try:
+        import isaaclab.utils.configclass as il_cc
+        import isaaclab.utils.dict as il_dict
+    except ImportError:
+        return
+    if getattr(il_dict, "_beamdojo_none_safe", False):
+        return
+    orig = il_dict.update_class_from_dict
+    wrapped = _none_safe_update_class_from_dict(orig)
+    il_dict.update_class_from_dict = wrapped
+    il_dict._beamdojo_none_safe = True
+    if getattr(il_cc, "update_class_from_dict", None) is orig:
+        il_cc.update_class_from_dict = wrapped
+
+
 def remaining_learning_iterations(current: int | None, max_iterations: int) -> int:
     """PPO iters so the run *ends* at ``max_iterations`` (paper: 10k / stage).
 
@@ -260,6 +384,7 @@ def inject_double_critic() -> None:
     _patch_runner_foot_optimizer(opr.OnPolicyRunner)
     _patch_runner_log_ep_infos(opr.OnPolicyRunner)
     _patch_store_code_state(opr)
+    _patch_hydra_none_from_dict()
     sync_wandb_identity_env()
     _patch_wandb_writer()
 

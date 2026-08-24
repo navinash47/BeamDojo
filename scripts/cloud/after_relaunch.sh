@@ -11,11 +11,24 @@ if [[ -d "$REPO/.git" ]]; then
   # Lambda/Docker often flags the NFS checkout as dubious ownership; fetch then fails
   # and the box trains a stale tree that still dies after Isaac boot.
   git config --global --add safe.directory "$REPO" || true
-  git -C "$REPO" fetch origin "$REF" || git -C "$REPO" fetch origin || echo "[WARN] git fetch failed; using checkout as-is."
-  if git -C "$REPO" show-ref --verify --quiet "refs/remotes/origin/${REF}" || git -C "$REPO" show-ref --verify --quiet "refs/heads/${REF}"; then
-    git -C "$REPO" checkout "$REF" || git -C "$REPO" checkout -B "$REF" "origin/${REF}" || true
-    git -C "$REPO" pull --ff-only origin "$REF" || true
+  synced=0
+  if git -C "$REPO" fetch origin "$REF"; then
+    synced=1
+  elif git -C "$REPO" fetch origin; then
+    synced=1
+  else
+    echo "[WARN] git fetch failed; using checkout as-is ($(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown))."
   fi
+  if [[ "$synced" -eq 1 ]]; then
+    # Discard dirty *tracked* files so NFS trains this origin tree. Never git clean
+    # (untracked .env.lambda and checkpoints must survive).
+    if git -C "$REPO" show-ref --verify --quiet "refs/remotes/origin/${REF}"; then
+      git -C "$REPO" checkout -f -B "$REF" "origin/${REF}"
+    elif git -C "$REPO" show-ref --verify --quiet "refs/heads/${REF}"; then
+      git -C "$REPO" checkout -f "$REF"
+    fi
+  fi
+  echo "BeamDojo HEAD $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown) (${REF})"
 fi
 
 if ! grep -q "return RigidObjectCfg(" "$REPO/h1_cfg/scene_props.py"; then
@@ -32,6 +45,10 @@ if ! grep -q "def _patch_store_code_state" "$REPO/scripts/rsl_rl/beamdojo_runtim
 fi
 if ! grep -q "def sanitize_ep_infos_for_rsl_log" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing extras['log'] sanitize. Pull ${REF} or a per-env foothold tensor in ep_infos blanks W&B for the iter." >&2
+  exit 1
+fi
+if ! grep -q "def reassert_gpu_env_cfg" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing Hydra leftover reassert. Pull ${REF} or a restored ANYmal RayCaster / mdp.height_scan crashes gym.make." >&2
   exit 1
 fi
 if ! grep -q "def apply_physx_gpu_capacity" "$REPO/h1_cfg/beamdojo_common.py"; then

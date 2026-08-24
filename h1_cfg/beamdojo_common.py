@@ -75,6 +75,9 @@ def flat_plane_terrain(cfg) -> None:
         ),
         debug_vis=False,
     )
+    # Parent ``LocomotionVelocityRoughEnvCfg.__post_init__`` copies the *generator*
+    # material onto ``sim.physics_material`` before this replace.
+    cfg.sim.physics_material = cfg.scene.terrain.physics_material
 
 
 def apply_sensors(cfg, spec: RobotSpec) -> None:

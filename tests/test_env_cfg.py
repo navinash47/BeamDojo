@@ -72,6 +72,7 @@ class EnvCfgContractTests(unittest.TestCase):
         shared = common.split("def apply_stage1")[0]
         self.assertIn("heading_command = False", shared)
         self.assertIn("cfg.scene.height_scanner = None", common)
+        self.assertIn("cfg.sim.physics_material = cfg.scene.terrain.physics_material", common)
         self.assertNotIn("RayCasterCfg", common)
         self.assertIn("def apply_physx_gpu_capacity", common)
         self.assertIn("h1_cfg/physx_gpu.py", common)

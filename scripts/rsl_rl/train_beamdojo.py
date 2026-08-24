@@ -235,6 +235,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
             print(f"[INFO] Resolved checkpoint: {resume_path}")
             status_body["checkpoint"] = resume_path
 
+        beamdojo_runtime.reassert_gpu_env_cfg(env_cfg)
         env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
         if isinstance(env.unwrapped, DirectMARLEnv):
