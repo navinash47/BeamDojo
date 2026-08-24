@@ -210,74 +210,84 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
         "checkpoint": None,
         "note": "Live curves are on W&B or TensorBoard. Checkpoints stay on NFS — do not git-commit .pt.",
     }
+    beamdojo_runtime.install_status_signal_hooks(status_body)
     status_path = beamdojo_runtime.write_training_status(
         {**status_body, "status": "running", "iteration": 0}
     )
     print(f"[INFO] Wrote training status: {status_path}")
 
-    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
-
-    if isinstance(env.unwrapped, DirectMARLEnv):
-        env = multi_agent_to_single_agent(env)
-
-    if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
-
-    if args_cli.video:
-        video_kwargs = {
-            "video_folder": os.path.join(log_dir, "videos", "train"),
-            "step_trigger": lambda step: step % args_cli.video_interval == 0,
-            "video_length": args_cli.video_length,
-            "disable_logger": True,
-        }
-        print("[INFO] Recording videos during training.")
-        print_dict(video_kwargs, nesting=4)
-        env = gym.wrappers.RecordVideo(env, **video_kwargs)
-
-    env = beamdojo_runtime.FootholdExtrasWrapper(env)
-    env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
-
-    if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-    elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-    else:
-        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-    runner.add_git_repo_to_log(__file__)
-    if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
-        print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-        runner.load(resume_path)
-
-    dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
-    dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
-
-    status_body["wandb_url"] = beamdojo_runtime.live_wandb_url(
-        getattr(agent_cfg, "wandb_project", "beamdojo")
-    )
-    beamdojo_runtime.write_training_status({**status_body, "status": "running", "iteration": 0})
-    beamdojo_runtime.attach_status_heartbeat(runner, status_body, every=10)
-
-    print(f"Target iterations: {agent_cfg.max_iterations}")
+    env = None
+    runner = None
     try:
+        env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+        if isinstance(env.unwrapped, DirectMARLEnv):
+            env = multi_agent_to_single_agent(env)
+
+        if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
+            resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+
+        if args_cli.video:
+            video_kwargs = {
+                "video_folder": os.path.join(log_dir, "videos", "train"),
+                "step_trigger": lambda step: step % args_cli.video_interval == 0,
+                "video_length": args_cli.video_length,
+                "disable_logger": True,
+            }
+            print("[INFO] Recording videos during training.")
+            print_dict(video_kwargs, nesting=4)
+            env = gym.wrappers.RecordVideo(env, **video_kwargs)
+
+        env = beamdojo_runtime.FootholdExtrasWrapper(env)
+        env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+
+        if agent_cfg.class_name == "OnPolicyRunner":
+            runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+        elif agent_cfg.class_name == "DistillationRunner":
+            runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+        else:
+            raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+        runner.add_git_repo_to_log(__file__)
+        if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
+            print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+            runner.load(resume_path)
+
+        dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
+        dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+
+        status_body["wandb_url"] = beamdojo_runtime.live_wandb_url(
+            getattr(agent_cfg, "wandb_project", "beamdojo")
+        )
+        beamdojo_runtime.write_training_status({**status_body, "status": "running", "iteration": 0})
+        beamdojo_runtime.attach_status_heartbeat(runner, status_body, every=10)
+
+        print(f"Target iterations: {agent_cfg.max_iterations}")
         runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
-    finally:
-        ckpt = os.path.join(log_dir, f"model_{getattr(runner, 'current_learning_iteration', 0)}.pt")
-        beamdojo_runtime.write_training_status(
-            {
+        it = int(getattr(runner, "current_learning_iteration", 0) or 0)
+        ckpt = os.path.join(log_dir, f"model_{it}.pt")
+        beamdojo_runtime.mark_training_idle(
+            f"Run finished. Copy {ckpt} off-box as insurance — never git-commit weights.",
+            **{
                 **status_body,
-                "status": "idle",
-                "iteration": int(getattr(runner, "current_learning_iteration", 0)),
+                "iteration": it,
                 "wandb_url": beamdojo_runtime.live_wandb_url(
                     getattr(agent_cfg, "wandb_project", "beamdojo")
                 ),
                 "checkpoint": ckpt,
-                "note": f"Run finished. Copy {ckpt} off-box as insurance — never git-commit weights.",
-            }
+            },
         )
-
-    env.close()
-    print("\nTraining complete!")
-    print(f"Logs and checkpoints saved under: {log_dir}")
+        print("\nTraining complete!")
+        print(f"Logs and checkpoints saved under: {log_dir}")
+    except Exception as exc:
+        it = int(getattr(runner, "current_learning_iteration", 0) or 0) if runner is not None else 0
+        beamdojo_runtime.mark_training_idle(
+            f"Train stopped ({type(exc).__name__}). No live run. Terminate the A10 if it is idle.",
+            **{**status_body, "iteration": it},
+        )
+        raise
+    finally:
+        if env is not None:
+            env.close()
 
 
 if __name__ == "__main__":

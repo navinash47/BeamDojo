@@ -20,6 +20,7 @@ TASK_IDS = {
     (2, "h1", "stones"): "Isaac-BeamDojo-Stage2-H1-Stones-v0",
     (1, "g1", "beam"): "Isaac-BeamDojo-Stage1-G1-v0",
     (2, "g1", "beam"): "Isaac-BeamDojo-Stage2-G1-v0",
+    (2, "g1", "stones"): "Isaac-BeamDojo-Stage2-G1-Stones-v0",
 }
 
 PLAY_IDS = {
@@ -28,6 +29,7 @@ PLAY_IDS = {
     (2, "h1", "stones"): "Isaac-BeamDojo-Stage2-H1-Stones-Play-v0",
     (1, "g1", "beam"): "Isaac-BeamDojo-Stage1-G1-Play-v0",
     (2, "g1", "beam"): "Isaac-BeamDojo-Stage2-G1-Play-v0",
+    (2, "g1", "stones"): "Isaac-BeamDojo-Stage2-G1-Stones-Play-v0",
 }
 
 
@@ -208,6 +210,33 @@ def attach_status_heartbeat(runner, payload: dict, *, every: int = 10) -> None:
         return result
 
     runner.log = _log
+
+
+def mark_training_idle(note: str | None = None, **payload) -> Path:
+    """Force idle so Kingdom never keeps a dead A10 marked running."""
+    return write_training_status(
+        {
+            **payload,
+            "status": "idle",
+            "note": note
+            or "Idle — GPU instance terminating or no train running. Checkpoints stay on NFS.",
+        }
+    )
+
+
+def install_status_signal_hooks(payload: dict) -> None:
+    """On SIGINT/SIGTERM, write idle before exit (Lambda terminate / Ctrl-C)."""
+    import signal
+
+    def _handle(signum, _frame):
+        mark_training_idle(
+            f"Caught signal {signum}; marking idle so Research Lab does not show a live train.",
+            **payload,
+        )
+        raise SystemExit(128 + int(signum))
+
+    signal.signal(signal.SIGINT, _handle)
+    signal.signal(signal.SIGTERM, _handle)
 
 
 class FootholdExtrasWrapper:

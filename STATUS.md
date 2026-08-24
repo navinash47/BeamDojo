@@ -6,7 +6,7 @@
 - **Priority:** P1
 
 ## Next 3 tasks
-1. A10 is **terminated when idle** (Lambda has no pause that keeps the VM). Confirm `model_*.pt` on `/lambda/nfs/beamdojo/logs` before terminate; keep the `beamdojo` filesystem.
+1. A10 is **terminated when idle** (Lambda has no pause that keeps the VM). Run `bash scripts/cloud/mark_idle.sh` then confirm `model_*.pt` on `/lambda/nfs/beamdojo/logs` before terminate; keep the `beamdojo` filesystem.
 2. Next GPU session: same region, attach NFS at launch, then `bash scripts/cloud/train_stage1.sh` (1024 envs, 10k iters, `--logger wandb`).
 3. After Stage 1 walks the imagined beam: Stage 2 (`train_stage2.sh`) then G1 (`--robot g1`). Copy NFS checkpoints off-box — never git-commit `.pt`.
 

@@ -40,6 +40,12 @@ class TaskRoutingTests(unittest.TestCase):
     def test_g1_stage2(self):
         self.assertEqual(self.rt.resolve_task(2, "g1"), "Isaac-BeamDojo-Stage2-G1-v0")
 
+    def test_g1_stage2_stones(self):
+        self.assertEqual(
+            self.rt.resolve_task(2, "g1", "stones"),
+            "Isaac-BeamDojo-Stage2-G1-Stones-v0",
+        )
+
     def test_unknown_combo(self):
         with self.assertRaises(ValueError):
             self.rt.resolve_task(1, "h1", "stones")
@@ -127,6 +133,16 @@ class TrainingStatusTests(unittest.TestCase):
         self.assertEqual(data["iteration"], 10)
         self.assertEqual(data["wandb_url"], "https://wandb.ai/x/beamdojo")
 
+    def test_mark_training_idle(self):
+        rt = self.rt
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo"}, clear=True):
+                    path = rt.mark_training_idle("unit idle")
+            data = json.loads(path.read_text())
+        self.assertEqual(data["status"], "idle")
+        self.assertEqual(data["note"], "unit idle")
+
 
 class GymIdSourceTests(unittest.TestCase):
     def test_cfg_files_register_expected_ids(self):
@@ -145,6 +161,7 @@ class GymIdSourceTests(unittest.TestCase):
             "Isaac-BeamDojo-Stage2-H1-Stones-v0",
             "Isaac-BeamDojo-Stage1-G1-v0",
             "Isaac-BeamDojo-Stage2-G1-v0",
+            "Isaac-BeamDojo-Stage2-G1-Stones-v0",
         ]:
             self.assertIn(gym_id, text)
         g1s2 = (root / "g1_cfg" / "beamdojo_stage2_cfg.py").read_text()

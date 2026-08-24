@@ -46,3 +46,38 @@ gym.register(
         "rsl_rl_cfg_entry_point": "beamdojo_agents.rsl_rl_ppo_cfg:BeamDojoG1Stage2PPORunnerCfg",
     },
 )
+
+
+@configclass
+class BeamDojoStage2G1StonesEnvCfg(LocomotionVelocityRoughEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        apply_stage2(self, G1, stones=True)
+
+
+@configclass
+class BeamDojoStage2G1StonesEnvCfg_PLAY(BeamDojoStage2G1StonesEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        apply_play(self)
+
+
+gym.register(
+    id="Isaac-BeamDojo-Stage2-G1-Stones-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": BeamDojoStage2G1StonesEnvCfg,
+        "rsl_rl_cfg_entry_point": "beamdojo_agents.rsl_rl_ppo_cfg:BeamDojoG1Stage2PPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-BeamDojo-Stage2-G1-Stones-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": BeamDojoStage2G1StonesEnvCfg_PLAY,
+        "rsl_rl_cfg_entry_point": "beamdojo_agents.rsl_rl_ppo_cfg:BeamDojoG1Stage2PPORunnerCfg",
+    },
+)
