@@ -74,9 +74,15 @@ class EnvCfgContractTests(unittest.TestCase):
         self.assertIn("cfg.scene.height_scanner = None", common)
         self.assertNotIn("RayCasterCfg", common)
         self.assertIn("def apply_physx_gpu_capacity", common)
-        self.assertIn("gpu_max_rigid_patch_count", common)
+        self.assertIn("h1_cfg/physx_gpu.py", common)
         self.assertIn("apply_physx_gpu_capacity(cfg, stones=False)", common)
         self.assertIn("apply_physx_gpu_capacity(cfg, stones=stones)", common)
+        physx = _read("h1_cfg/physx_gpu.py")
+        self.assertIn("PHYSX_PATCH_COUNT_BEAM = 16 * 2**15", physx)
+        self.assertIn("PHYSX_PATCH_COUNT_STONES = 2**20", physx)
+        self.assertNotIn("gpu_max_rigid_contact_count", physx)
+        self.assertNotIn("gpu_total_aggregate_pairs_capacity", physx)
+        self.assertIn("reshape(scan.shape[0], -1)", _read("h1_cfg/mdp.py"))
 
     def test_stone_count_matches_declared_slots(self):
         props = _read("h1_cfg/scene_props.py")

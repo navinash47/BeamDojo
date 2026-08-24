@@ -651,6 +651,9 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("_patch_store_code_state", relaunch)
         self.assertIn("safe.directory", relaunch)
         self.assertIn("apply_physx_gpu_capacity", relaunch)
+        self.assertIn("PHYSX_PATCH_COUNT_BEAM", relaunch)
+        self.assertIn("gpu_max_rigid_contact_count", relaunch)
+        self.assertIn("physx_gpu.py", relaunch)
 
     def test_stage2_catcher_and_ground_disable_are_wired(self):
         root = Path(__file__).resolve().parents[1]

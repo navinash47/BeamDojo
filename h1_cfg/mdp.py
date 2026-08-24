@@ -176,6 +176,8 @@ def task_height_scan(
                 extend=extend,
             )
     scan = (pos[:, 2].unsqueeze(-1) - hz) - offset
+    # ActorCritic 3.0.1 asserts concatenated policy terms are 2D ([N, dim]).
+    scan = scan.reshape(scan.shape[0], -1)
     std = float(getattr(env, "beamdojo_scan_noise_std", 0.0) or 0.0)
     if std > 0 and corrupt:
         scan = scan + std * torch.randn_like(scan)

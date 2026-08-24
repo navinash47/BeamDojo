@@ -279,32 +279,14 @@ def apply_shared_locomotion(cfg, spec: RobotSpec, *, stage: int) -> None:
 
 
 def apply_physx_gpu_capacity(cfg, *, stones: bool = False) -> None:
-    """Raise PhysX GPU buffers for cloned beam/stone cuboids (Isaac Lab 2.3.2).
+    """Raise dual-terrain PhysX GPU buffers without OOMing A10 24GB.
 
-    Parent locomotion sets ``gpu_max_rigid_patch_count = 10 * 2**15``. Dual-terrain
-    adds a kinematic cuboid per env (Stage 2: colliding beam, or 24 stones × 1024
-    envs). Undersized GPU contact/patch buffers abort the sim before ``learn()``
-    or W&B ever start.
+    Kept as a ``def`` in this file so older ``after_relaunch.sh`` preflights
+    still pass after git pull. Floors live in ``h1_cfg/physx_gpu.py``.
     """
-    physx = getattr(getattr(cfg, "sim", None), "physx", None)
-    if physx is None:
-        return
+    from h1_cfg.physx_gpu import apply_physx_gpu_capacity as _apply
 
-    def _raise(name: str, floor: int) -> None:
-        current = getattr(physx, name, None)
-        try:
-            value = int(current or 0)
-        except (TypeError, ValueError):
-            value = 0
-        setattr(physx, name, max(value, floor))
-
-    _raise("gpu_max_rigid_patch_count", 2**20)
-    _raise("gpu_max_rigid_contact_count", 2**24)
-    _raise("gpu_found_lost_pairs_capacity", 2**22)
-    if stones:
-        _raise("gpu_max_rigid_patch_count", 2**21)
-        _raise("gpu_found_lost_pairs_capacity", 2**23)
-        _raise("gpu_total_aggregate_pairs_capacity", 2**23)
+    _apply(cfg, stones=stones)
 
 
 def apply_stage1(cfg, spec: RobotSpec = H1) -> None:

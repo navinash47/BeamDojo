@@ -34,6 +34,14 @@ if ! grep -q "def apply_physx_gpu_capacity" "$REPO/h1_cfg/beamdojo_common.py"; t
   echo "beamdojo_common.py is missing PhysX GPU buffer bump. Pull ${REF} or cloned beams/stones overflow contact buffers." >&2
   exit 1
 fi
+if ! grep -q "PHYSX_PATCH_COUNT_BEAM" "$REPO/h1_cfg/physx_gpu.py"; then
+  echo "h1_cfg/physx_gpu.py is missing A10-safe PhysX floors. Pull ${REF} or a stale 16M contact stream OOMs the A10 before W&B." >&2
+  exit 1
+fi
+if grep -qE '["'"'"']gpu_max_rigid_contact_count["'"'"']' "$REPO/h1_cfg/physx_gpu.py"; then
+  echo "physx_gpu.py must not raise gpu_max_rigid_contact_count (A10 24GB OOM). Pull ${REF}." >&2
+  exit 1
+fi
 
 # shellcheck disable=SC1091
 source "$ROOT/_env.sh"
