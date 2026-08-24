@@ -72,7 +72,22 @@ def resolve_task(stage: int, robot: str, terrain: str = "beam", *, play: bool = 
 
 
 def experiment_name(stage: int, robot: str) -> str:
-    return f"beamdojo_{robot}_stage{stage}"
+    return f"beamdojo_{str(robot).lower()}_stage{int(stage)}"
+
+
+def resolve_load_experiment(stage: int, robot: str, *, load_experiment: str | None = None) -> str:
+    """Which ``logs/rsl_rl/<name>`` folder to read checkpoints from.
+
+    Stage 2 fine-tunes Stage 1, so the default load experiment is Stage 1.
+    Set ``LOAD_EXPERIMENT`` (or ``load_experiment``) to continue an interrupted
+    Stage 2 run from ``beamdojo_<robot>_stage2``.
+    """
+    override = (load_experiment or os.environ.get("LOAD_EXPERIMENT") or "").strip()
+    if override:
+        return override
+    if int(stage) >= 2:
+        return experiment_name(1, robot)
+    return experiment_name(stage, robot)
 
 
 def ensure_beamdojo_registered() -> None:
@@ -99,6 +114,47 @@ def inject_double_critic() -> None:
 
     opr.ActorCriticDouble = ActorCriticDouble
     opr.PPODoubleCritic = PPODoubleCritic
+    _patch_runner_foot_optimizer(opr.OnPolicyRunner)
+
+
+def _patch_runner_foot_optimizer(runner_cls) -> None:
+    """Persist the foothold Adam state next to rsl-rl's loco optimizer."""
+    if getattr(runner_cls, "_beamdojo_foot_ckpt", False):
+        return
+    orig_save = runner_cls.save
+    orig_load = runner_cls.load
+
+    def save(self, path, infos=None):
+        orig_save(self, path, infos)
+        foot = getattr(getattr(self, "alg", None), "foot_optimizer", None)
+        if foot is None:
+            return
+        import torch
+
+        blob = torch.load(path, map_location="cpu", weights_only=False)
+        blob["foot_optimizer_state_dict"] = foot.state_dict()
+        torch.save(blob, path)
+
+    def load(self, path, load_optimizer=True, map_location=None):
+        infos = orig_load(self, path, load_optimizer=load_optimizer, map_location=map_location)
+        foot = getattr(getattr(self, "alg", None), "foot_optimizer", None)
+        if not load_optimizer or foot is None:
+            return infos
+        import torch
+
+        blob = torch.load(path, map_location=map_location, weights_only=False)
+        state = blob.get("foot_optimizer_state_dict")
+        if not state:
+            return infos
+        try:
+            foot.load_state_dict(state)
+        except Exception as exc:
+            print(f"[WARN] Not loading foothold optimizer: {exc}")
+        return infos
+
+    runner_cls.save = save
+    runner_cls.load = load
+    runner_cls._beamdojo_foot_ckpt = True
 
 
 def resolve_log_root(experiment_name: str) -> str:
@@ -114,6 +170,16 @@ def resolve_log_root(experiment_name: str) -> str:
     path = (base / "rsl_rl" / experiment_name).resolve()
     path.mkdir(parents=True, exist_ok=True)
     return str(path)
+
+
+def resolve_load_log_root(
+    stage: int,
+    robot: str,
+    *,
+    load_experiment: str | None = None,
+) -> str:
+    """Log root used by ``get_checkpoint_path`` when resuming."""
+    return resolve_log_root(resolve_load_experiment(stage, robot, load_experiment=load_experiment))
 
 
 def wandb_project_url(project: str = "beamdojo") -> str:

@@ -31,7 +31,9 @@ Checkpoints stay on `/lambda/nfs/beamdojo/logs/...`. Never git-commit `.pt`.
     --headless --device cuda:0 --logger wandb --log_project_name beamdojo
 ```
 
-Stage 2 (resume Stage 1): `--stage 2 --resume --load_run <run> --checkpoint model_XXXX.pt`
+Stage 2 (fine-tune Stage 1): `--stage 2 --resume --load_run <stage1-run-folder> --checkpoint model_XXXX.pt`
+
+The Stage 1 run folder lives under `logs/rsl_rl/beamdojo_<robot>_stage1`. To continue an interrupted Stage 2 job, pass `--load_experiment beamdojo_h1_stage2` (or `LOAD_EXPERIMENT`).
 
 G1: `--robot g1`
 

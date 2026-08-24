@@ -53,6 +53,19 @@ class TaskRoutingTests(unittest.TestCase):
     def test_experiment_name(self):
         self.assertEqual(self.rt.experiment_name(2, "g1"), "beamdojo_g1_stage2")
 
+    def test_stage2_resume_defaults_to_stage1_experiment(self):
+        self.assertEqual(self.rt.resolve_load_experiment(2, "h1"), "beamdojo_h1_stage1")
+        self.assertEqual(self.rt.resolve_load_experiment(2, "g1"), "beamdojo_g1_stage1")
+        self.assertEqual(self.rt.resolve_load_experiment(1, "h1"), "beamdojo_h1_stage1")
+
+    def test_load_experiment_override(self):
+        self.assertEqual(
+            self.rt.resolve_load_experiment(2, "h1", load_experiment="beamdojo_h1_stage2"),
+            "beamdojo_h1_stage2",
+        )
+        with mock.patch.dict(os.environ, {"LOAD_EXPERIMENT": "beamdojo_h1_stage2"}, clear=False):
+            self.assertEqual(self.rt.resolve_load_experiment(2, "h1"), "beamdojo_h1_stage2")
+
 
 class WandbUrlTests(unittest.TestCase):
     @classmethod
@@ -269,6 +282,10 @@ class GymIdSourceTests(unittest.TestCase):
             self.assertIn(gym_id, text)
         g1s2 = (root / "g1_cfg" / "beamdojo_stage2_cfg.py").read_text()
         self.assertIn("BeamDojoG1Stage2PPORunnerCfg", g1s2)
+        train = (root / "scripts" / "rsl_rl" / "train_beamdojo.py").read_text()
+        self.assertIn("resolve_load_log_root", train)
+        stage2 = (root / "scripts" / "cloud" / "train_stage2.sh").read_text()
+        self.assertIn("beamdojo_${ROBOT}_stage1", stage2)
 
     def test_stage2_catcher_and_ground_disable_are_wired(self):
         root = Path(__file__).resolve().parents[1]

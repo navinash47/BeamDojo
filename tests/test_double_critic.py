@@ -35,6 +35,14 @@ class DoubleCriticModuleTests(unittest.TestCase):
         self.assertGreater(super_at, boot_at)
         self.assertIn("time_outs", inspect.getsource(dc._timeout_bootstrap_reward))
 
+    def test_missing_foothold_checkpoint_skips_optimizer_resume(self):
+        import beamdojo_agents.double_critic as dc
+
+        src = inspect.getsource(dc.ActorCriticDouble.load_state_dict)
+        self.assertIn("critic_foothold", src)
+        self.assertIn("return False", src)
+        self.assertLess(src.find("return False"), src.rfind("return True"))
+
 
 if __name__ == "__main__":
     unittest.main()

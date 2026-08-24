@@ -226,7 +226,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
             env = multi_agent_to_single_agent(env)
 
         if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
-            resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+            load_root = beamdojo_runtime.resolve_load_log_root(
+                args_cli.stage,
+                args_cli.robot,
+                load_experiment=getattr(args_cli, "load_experiment", None),
+            )
+            print(f"[INFO] Resume checkpoints from: {load_root}")
+            resume_path = get_checkpoint_path(load_root, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
         if args_cli.video:
             video_kwargs = {

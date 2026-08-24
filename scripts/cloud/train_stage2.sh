@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Stage 2 hard beam, resume from Stage 1. Set LOAD_RUN and CHECKPOINT.
+# Stage 2 hard beam, resume from Stage 1. Set LOAD_RUN to the Stage 1 run folder
+# under logs/rsl_rl/beamdojo_${ROBOT:-h1}_stage1 (not stage2).
+# Continue an interrupted Stage 2 run with:
+#   LOAD_EXPERIMENT=beamdojo_h1_stage2 LOAD_RUN=<stage2-run> CHECKPOINT=model_XXXX.pt
 set -euo pipefail
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "$0")" && pwd)/_env.sh"
@@ -7,7 +10,7 @@ NUM_ENVS="${NUM_ENVS:-1024}"
 MAX_ITERS="${MAX_ITERS:-10000}"
 ROBOT="${ROBOT:-h1}"
 TERRAIN="${TERRAIN:-beam}"
-LOAD_RUN="${LOAD_RUN:?Set LOAD_RUN to the Stage 1 run folder name}"
+LOAD_RUN="${LOAD_RUN:?Set LOAD_RUN to the Stage 1 run folder name (under beamdojo_${ROBOT}_stage1)}"
 CHECKPOINT="${CHECKPOINT:-model_9999.pt}"
 LOGGER_ARGS=(--logger tensorboard)
 if [[ -n "${WANDB_API_KEY:-}" ]]; then
@@ -17,6 +20,10 @@ if [[ -n "${WANDB_API_KEY:-}" ]]; then
   else
     echo "W&B project ${WANDB_PROJECT:-beamdojo} — open https://wandb.ai (set WANDB_ENTITY for a direct link)."
   fi
+fi
+LOAD_EXP_ARGS=()
+if [[ -n "${LOAD_EXPERIMENT:-}" ]]; then
+  LOAD_EXP_ARGS=(--load_experiment "$LOAD_EXPERIMENT")
 fi
 exec /workspace/isaaclab/isaaclab.sh -p train_beamdojo.py \
   --headless \
@@ -29,4 +36,5 @@ exec /workspace/isaaclab/isaaclab.sh -p train_beamdojo.py \
   --resume \
   --load_run "$LOAD_RUN" \
   --checkpoint "$CHECKPOINT" \
+  "${LOAD_EXP_ARGS[@]}" \
   "${LOGGER_ARGS[@]}"

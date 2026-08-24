@@ -73,6 +73,24 @@ class ActorCriticDouble(ActorCritic):
         critic_obs = self.critic_obs_normalizer(critic_obs)
         return self.critic_foothold(critic_obs)
 
+    def load_state_dict(self, state_dict, strict=True):
+        """Load actor + critics. Missing critic_foothold → random init, no optimizer resume.
+
+        rsl-rl 3.0.1 ``OnPolicyRunner.load`` skips the optimizer when this returns False.
+        That is required when the checkpoint is a single-critic Stage 1 smoke: the new
+        loco-only Adam param groups would not match the saved optimizer.
+        """
+        has_foot = any(str(key).startswith("critic_foothold") for key in state_dict)
+        if not has_foot:
+            print(
+                "[WARN] Checkpoint has no critic_foothold. Loading actor/critic 1 only; "
+                "critic 2 stays random and the optimizer will not resume."
+            )
+            nn.Module.load_state_dict(self, state_dict, strict=False)
+            return False
+        nn.Module.load_state_dict(self, state_dict, strict=strict)
+        return True
+
 
 class PPODoubleCritic(PPO):
     """PPO with two value heads and mixed normalized advantages."""

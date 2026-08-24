@@ -137,7 +137,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     elif args_cli.checkpoint:
         resume_path = retrieve_file_path(args_cli.checkpoint)
     else:
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+        load_root = beamdojo_runtime.resolve_load_log_root(
+            args_cli.stage,
+            args_cli.robot,
+            load_experiment=getattr(args_cli, "load_experiment", None),
+        )
+        if args_cli.stage >= 2 and not getattr(args_cli, "load_experiment", None):
+            # Prefer a Stage 2 run when one exists; else fine-tune source (Stage 1).
+            stage2_root = beamdojo_runtime.resolve_log_root(
+                beamdojo_runtime.experiment_name(args_cli.stage, args_cli.robot)
+            )
+            try:
+                resume_path = get_checkpoint_path(stage2_root, agent_cfg.load_run, agent_cfg.load_checkpoint)
+            except ValueError:
+                print(f"[INFO] No Stage 2 checkpoint in {stage2_root}; loading Stage 1 from {load_root}")
+                resume_path = get_checkpoint_path(load_root, agent_cfg.load_run, agent_cfg.load_checkpoint)
+        else:
+            resume_path = get_checkpoint_path(load_root, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
     log_dir = os.path.dirname(resume_path)
 

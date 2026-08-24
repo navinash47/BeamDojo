@@ -29,6 +29,12 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
     # -- load arguments
     arg_group.add_argument("--resume", action="store_true", default=False, help="Whether to resume from a checkpoint.")
     arg_group.add_argument("--load_run", type=str, default=None, help="Name of the run folder to resume from.")
+    arg_group.add_argument(
+        "--load_experiment",
+        type=str,
+        default=None,
+        help="Log experiment folder to load from (default: Stage 1 when --stage 2).",
+    )
     arg_group.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file to resume from.")
     # -- logger arguments
     arg_group.add_argument(
