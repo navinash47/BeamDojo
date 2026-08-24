@@ -10,5 +10,13 @@ if [[ -f /workspace/beamdojo/.env.lambda ]]; then
   source /workspace/beamdojo/.env.lambda
   set +a
 fi
+# rsl-rl 3.0.1 WandbSummaryWriter reads WANDB_USERNAME, not WANDB_ENTITY.
+# Empty WANDB_USERNAME is set-but-blank → wandb.init(entity="") fails.
+if [[ -n "${WANDB_ENTITY:-}" && -z "${WANDB_USERNAME:-}" ]]; then
+  export WANDB_USERNAME="$WANDB_ENTITY"
+fi
+if [[ -z "${WANDB_USERNAME:-}" ]]; then
+  unset WANDB_USERNAME || true
+fi
 export PYTHONPATH="/workspace/beamdojo:/workspace/isaaclab/source/isaaclab:/workspace/isaaclab/source/isaaclab_assets:/workspace/isaaclab/source/isaaclab_tasks:/workspace/isaaclab/source/isaaclab_rl:${PYTHONPATH:-}"
 cd /workspace/beamdojo/scripts/rsl_rl

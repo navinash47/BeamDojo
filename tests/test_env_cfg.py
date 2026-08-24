@@ -67,6 +67,10 @@ class EnvCfgContractTests(unittest.TestCase):
         self.assertIn("def _zero_root_reset_velocity", common)
         self.assertIn("heading_command = False", common)
         self.assertIn("debug_vis = False", common)
+        shared = common.split("def apply_stage1")[0]
+        self.assertIn("heading_command = False", shared)
+        self.assertIn("cfg.scene.height_scanner = None", common)
+        self.assertNotIn("RayCasterCfg", common)
 
     def test_stone_count_matches_declared_slots(self):
         props = _read("h1_cfg/scene_props.py")

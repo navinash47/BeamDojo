@@ -165,6 +165,21 @@ class WandbUrlTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"WANDB_ENTITY": "lab"}, clear=True):
             self.assertEqual(self.rt.live_wandb_url("beamdojo"), "https://wandb.ai/lab/beamdojo")
 
+    def test_sync_wandb_copies_entity_to_username(self):
+        with mock.patch.dict(os.environ, {"WANDB_ENTITY": "lab"}, clear=True):
+            self.rt.sync_wandb_identity_env()
+            self.assertEqual(os.environ["WANDB_USERNAME"], "lab")
+
+    def test_sync_wandb_unsets_blank_username(self):
+        with mock.patch.dict(os.environ, {"WANDB_USERNAME": "  "}, clear=True):
+            self.rt.sync_wandb_identity_env()
+            self.assertNotIn("WANDB_USERNAME", os.environ)
+
+    def test_sync_wandb_prefers_entity_over_username(self):
+        with mock.patch.dict(os.environ, {"WANDB_ENTITY": "team", "WANDB_USERNAME": "user"}, clear=True):
+            self.rt.sync_wandb_identity_env()
+            self.assertEqual(os.environ["WANDB_USERNAME"], "team")
+
     def test_live_identity_reads_entity_from_run(self):
         fake = mock.MagicMock()
         fake.run = mock.MagicMock()
@@ -293,6 +308,58 @@ class TrainingStatusTests(unittest.TestCase):
         self.assertEqual(data["wandb_url"], "https://wandb.ai/x/beamdojo/runs/live1")
         self.assertEqual(data["wandb_entity"], "x")
 
+    def test_prepare_falls_back_when_wandb_init_fails(self):
+        rt = self.rt
+        fake_writer = object()
+
+        class Runner:
+            current_learning_iteration = 0
+            writer = None
+            log_dir = None
+            logger_type = "wandb"
+
+            def log(self, locs):
+                return locs
+
+            def _prepare_logging_writer(self):
+                raise RuntimeError("wandb.init failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo"}, clear=True):
+                    runner = Runner()
+                    runner.log_dir = tmp
+                    with mock.patch.object(rt, "_fallback_tensorboard_writer", return_value=fake_writer) as fallback:
+                        rt.attach_status_heartbeat(runner, {"wandb_project": "beamdojo"}, every=10)
+                        self.assertIs(runner._prepare_logging_writer(), fake_writer)
+                        fallback.assert_called_once_with(runner)
+                    data = json.loads((Path(tmp) / "tracking" / "training-status.json").read_text())
+        self.assertEqual(data["status"], "running")
+
+    def test_prepare_keeps_writer_when_post_init_fails(self):
+        rt = self.rt
+        existing = object()
+
+        class Runner:
+            current_learning_iteration = 0
+            writer = existing
+            log_dir = None
+
+            def log(self, locs):
+                return locs
+
+            def _prepare_logging_writer(self):
+                raise RuntimeError("store_config failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo"}, clear=True):
+                    runner = Runner()
+                    rt.attach_status_heartbeat(runner, {"wandb_project": "beamdojo"}, every=10)
+                    with mock.patch.object(rt, "_fallback_tensorboard_writer") as fallback:
+                        self.assertIs(runner._prepare_logging_writer(), existing)
+                        fallback.assert_not_called()
+
     def test_mark_training_idle(self):
         rt = self.rt
         with tempfile.TemporaryDirectory() as tmp:
@@ -327,6 +394,32 @@ class TrainingStatusTests(unittest.TestCase):
         self.assertEqual(info["foothold_reward"], [-0.06, -0.02])
         self.assertEqual(info["log"]["foothold_penalty"], [-0.06, -0.02])
 
+    def test_wrapper_copies_foothold_onto_unwrapped_extras(self):
+        rt = self.rt
+
+        class Vec(list):
+            def __mul__(self, other):
+                return Vec(x * other for x in self)
+
+        class Env:
+            unwrapped = None
+            extras = {"log": {}}
+            beamdojo_foothold_step = Vec([-1.0])
+            step_dt = 0.02
+
+            def __init__(self):
+                self.unwrapped = self
+
+            def step(self, _action):
+                return (None, None, None, None, {"log": {}})
+
+        env = Env()
+        wrapped = rt.FootholdExtrasWrapper(env)
+        info = wrapped.step(None)[-1]
+        self.assertEqual(info["foothold_penalty"], [-0.02])
+        self.assertEqual(env.extras["foothold_penalty"], [-0.02])
+        self.assertEqual(env.extras["log"]["foothold_penalty"], [-0.02])
+
 
 class GymIdSourceTests(unittest.TestCase):
     def test_cfg_files_register_expected_ids(self):
@@ -357,6 +450,9 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("current_learning_iteration = 0", train)
         self.assertIn("remaining_learning_iterations", train)
         self.assertIn("Could not dump cfg yaml", train)
+        env_sh = (root / "scripts" / "cloud" / "_env.sh").read_text()
+        self.assertIn("WANDB_USERNAME", env_sh)
+        self.assertIn("WANDB_ENTITY", env_sh)
         play = (root / "scripts" / "rsl_rl" / "play_beamdojo.py").read_text()
         self.assertIn("pick_play_checkpoint", play)
         stage2 = (root / "scripts" / "cloud" / "train_stage2.sh").read_text()

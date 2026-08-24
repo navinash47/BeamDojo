@@ -208,6 +208,8 @@ def inject_double_critic() -> None:
     opr.ActorCriticDouble = ActorCriticDouble
     opr.PPODoubleCritic = PPODoubleCritic
     _patch_runner_foot_optimizer(opr.OnPolicyRunner)
+    sync_wandb_identity_env()
+    _patch_wandb_writer()
 
 
 def _patch_runner_foot_optimizer(runner_cls) -> None:
@@ -275,6 +277,64 @@ def resolve_load_log_root(
     return resolve_log_root(resolve_load_experiment(stage, robot, load_experiment=load_experiment))
 
 
+def sync_wandb_identity_env() -> None:
+    """Align env vars with rsl-rl 3.0.1 ``WandbSummaryWriter``.
+
+    That writer does ``os.environ["WANDB_USERNAME"]`` (KeyError → entity=None).
+    Docs and ``.env.lambda`` set ``WANDB_ENTITY``. If username is missing, copy
+    the entity so ``wandb.init`` lands in the same place Kingdom GraphQL queries.
+    A blank ``WANDB_USERNAME=`` is set, so it is *not* a KeyError — ``wandb.init(entity="")``
+    then aborts ``learn()`` after Isaac boot. Unset blanks.
+    """
+    entity = (os.environ.get("WANDB_ENTITY") or "").strip()
+    username = (os.environ.get("WANDB_USERNAME") or "").strip()
+    chosen = entity or username
+    if chosen:
+        os.environ["WANDB_USERNAME"] = chosen
+        if not entity:
+            os.environ["WANDB_ENTITY"] = chosen
+        return
+    if "WANDB_USERNAME" in os.environ:
+        del os.environ["WANDB_USERNAME"]
+
+
+def _patch_wandb_writer() -> None:
+    """Keep a 10k CUDA run alive if Isaac cfg is not wandb-JSON-serializable."""
+    try:
+        from rsl_rl.utils.wandb_utils import WandbSummaryWriter
+    except Exception:
+        return
+    if getattr(WandbSummaryWriter, "_beamdojo_store_cfg", False):
+        return
+    orig = WandbSummaryWriter.store_config
+
+    def store_config(self, env_cfg, runner_cfg, alg_cfg, policy_cfg):
+        try:
+            orig(self, env_cfg, runner_cfg, alg_cfg, policy_cfg)
+        except Exception as exc:
+            print(f"[WARN] wandb store_config skipped ({type(exc).__name__}): {exc}")
+
+    WandbSummaryWriter.store_config = store_config
+    WandbSummaryWriter._beamdojo_store_cfg = True
+
+
+def _fallback_tensorboard_writer(runner):
+    """If wandb.init fails, still log PPO scalars so Research Lab heartbeats run."""
+    if getattr(runner, "writer", None) is not None:
+        return runner.writer
+    log_dir = getattr(runner, "log_dir", None)
+    if not log_dir:
+        return None
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except Exception as exc:
+        print(f"[WARN] TensorBoard fallback unavailable: {exc}")
+        return None
+    runner.logger_type = "tensorboard"
+    runner.writer = SummaryWriter(log_dir=log_dir, flush_secs=10)
+    return runner.writer
+
+
 def wandb_project_url(project: str = "beamdojo") -> str:
     entity = (os.environ.get("WANDB_ENTITY") or os.environ.get("WANDB_USERNAME") or "").strip()
     if entity:
@@ -316,6 +376,7 @@ def live_wandb_url(project: str = "beamdojo") -> str:
 
 def apply_wandb_defaults(agent_cfg, args_cli) -> None:
     """Use W&B when a key is present unless the user picked another logger."""
+    sync_wandb_identity_env()
     logger = getattr(args_cli, "logger", None)
     if logger:
         agent_cfg.logger = logger
@@ -397,7 +458,21 @@ def attach_status_heartbeat(runner, payload: dict, *, every: int = 10) -> None:
     if callable(orig_prepare):
 
         def _prepare(*args, **kwargs):
-            result = orig_prepare(*args, **kwargs)
+            try:
+                result = orig_prepare(*args, **kwargs)
+            except Exception as exc:
+                if getattr(runner, "writer", None) is not None:
+                    print(
+                        f"[WARN] Logger post-init failed ({type(exc).__name__}: {exc}). "
+                        "Continuing with the existing writer."
+                    )
+                    result = runner.writer
+                else:
+                    print(
+                        f"[WARN] Logger setup failed ({type(exc).__name__}: {exc}). "
+                        "Falling back to TensorBoard so the 10k run still starts."
+                    )
+                    result = _fallback_tensorboard_writer(runner)
             write_training_status(_status_from_runner(runner, payload))
             return result
 
@@ -483,6 +558,16 @@ class FootholdExtrasWrapper:
                 info["log"] = log
             log["foothold_reward"] = contrib
             log["foothold_penalty"] = contrib
+            raw_extras = getattr(raw, "extras", None)
+            if isinstance(raw_extras, dict) and raw_extras is not info:
+                raw_extras["foothold_reward"] = contrib
+                raw_extras["foothold_penalty"] = contrib
+                raw_log = raw_extras.get("log")
+                if not isinstance(raw_log, dict):
+                    raw_log = {}
+                    raw_extras["log"] = raw_log
+                raw_log["foothold_reward"] = contrib
+                raw_log["foothold_penalty"] = contrib
         return result
 
     def reset(self, *args, **kwargs):

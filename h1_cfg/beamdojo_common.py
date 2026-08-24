@@ -13,7 +13,7 @@ from isaaclab.managers import (
     SceneEntityCfg,
     TerminationTermCfg as DoneTerm,
 )
-from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
+from isaaclab.sensors import ContactSensorCfg
 from isaaclab.terrains import TerrainImporterCfg
 
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
@@ -78,15 +78,10 @@ def flat_plane_terrain(cfg) -> None:
 
 
 def apply_sensors(cfg, spec: RobotSpec) -> None:
-    # Kept for debug vis only; policy height scan uses the task heightfield.
-    cfg.scene.height_scanner = RayCasterCfg(
-        prim_path=spec.scanner_prim,
-        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.5)),
-        ray_alignment="yaw",
-        pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.5, 1.5]),
-        debug_vis=False,
-        mesh_prim_paths=["/World/ground"],
-    )
+    # Policy scan is the task heightfield (task_height_scan), not rays.
+    # Parent ANYmal RayCaster (~256 rays × 1024 envs) is unused and an A10 hitch.
+    _ = spec
+    cfg.scene.height_scanner = None
     cfg.scene.contact_forces = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*",
         history_length=3,
@@ -94,8 +89,6 @@ def apply_sensors(cfg, spec: RobotSpec) -> None:
         update_period=0.0,
     )
     dt = float(getattr(cfg.sim, "dt", 0.005) or 0.005)
-    dec = int(getattr(cfg, "decimation", 4) or 4)
-    cfg.scene.height_scanner.update_period = dec * dt
     cfg.scene.contact_forces.update_period = dt
 
 
@@ -269,6 +262,8 @@ def apply_shared_locomotion(cfg, spec: RobotSpec, *, stage: int) -> None:
     if hasattr(cfg.commands, "base_velocity"):
         # 1024-env command arrows are a common Isaac Lab headless hitch.
         cfg.commands.base_velocity.debug_vis = False
+        # Parent ANYmal heading target yaws the robot off a 20 cm imagined/real beam.
+        cfg.commands.base_velocity.heading_command = False
 
     start_w = BEAM_WIDTH_HARD if stage == 1 else BEAM_WIDTH_EASY
     cfg.events.init_beamdojo = EventTerm(
@@ -362,8 +357,6 @@ def apply_stage2(cfg, spec: RobotSpec = H1, *, stones: bool = False) -> None:
     cfg.commands.base_velocity.ranges.lin_vel_y = (-0.15, 0.15)
     cfg.commands.base_velocity.ranges.ang_vel_z = (-0.4, 0.4)
     cfg.commands.base_velocity.rel_standing_envs = 0.1
-    # Parent ANYmal heading target yaws the robot off a 20–40 cm beam.
-    cfg.commands.base_velocity.heading_command = False
 
     if not stones:
         cfg.curriculum.beam_width = CurrTerm(
