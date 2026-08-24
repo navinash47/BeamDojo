@@ -8,6 +8,13 @@ scripts/cloud/lambda.host.env
 logs/
 videos/
 wandb/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+# Keep a few small GPU proof clips in git; raw rollouts stay local.
+!proofs/
+!proofs/*.mp4
 __pycache__/
 *.pyc
 .DS_Store

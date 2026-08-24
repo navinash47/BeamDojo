@@ -1,0 +1,1 @@
+{"ts":"2026-08-24T18:00:00Z","source":"lambda","model":"A10","hourly_usd":1.29,"hours":3,"actual_usd":3.87,"note":"Lambda 1x A10 · Isaac Sim 5.1 / Isaac Lab 2.3.2 · Stage 1 CUDA smoke (64 envs, 5 PPO iters) + RTX eval video. Hours estimated until the instance is terminated; update this row or append a close-out line."}
