@@ -64,6 +64,20 @@ class WandbUrlTests(unittest.TestCase):
                 "https://wandb.ai/avinash/beamdojo",
             )
 
+    def test_live_url_prefers_wandb_run(self):
+        fake = mock.MagicMock()
+        fake.run = mock.MagicMock()
+        fake.run.url = "https://wandb.ai/avinash/beamdojo/runs/abc123"
+        with mock.patch.dict("sys.modules", {"wandb": fake}):
+            self.assertEqual(
+                self.rt.live_wandb_url("beamdojo"),
+                "https://wandb.ai/avinash/beamdojo/runs/abc123",
+            )
+
+    def test_live_url_falls_back_without_run(self):
+        with mock.patch.dict(os.environ, {"WANDB_ENTITY": "lab"}, clear=True):
+            self.assertEqual(self.rt.live_wandb_url("beamdojo"), "https://wandb.ai/lab/beamdojo")
+
 
 class TrainingStatusTests(unittest.TestCase):
     @classmethod
@@ -82,6 +96,36 @@ class TrainingStatusTests(unittest.TestCase):
             self.assertEqual(data["status"], "idle")
             self.assertEqual(data["wandb_url"], "https://wandb.ai/x/beamdojo")
             self.assertIn("updated", data)
+
+    def test_heartbeat_writes_every_n_iters(self):
+        rt = self.rt
+        logs = []
+
+        class Runner:
+            current_learning_iteration = 0
+
+            def log(self, locs):
+                logs.append(locs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo", "WANDB_ENTITY": "x"}, clear=True):
+                    runner = Runner()
+                    rt.attach_status_heartbeat(
+                        runner,
+                        {"wandb_project": "beamdojo", "log_dir": str(Path(tmp) / "run")},
+                        every=10,
+                    )
+                    runner.current_learning_iteration = 3
+                    runner.log({"it": 3})
+                    self.assertFalse((Path(tmp) / "tracking" / "training-status.json").exists())
+                    runner.current_learning_iteration = 10
+                    runner.log({"it": 10})
+                    data = json.loads((Path(tmp) / "tracking" / "training-status.json").read_text())
+        self.assertEqual(logs, [{"it": 3}, {"it": 10}])
+        self.assertEqual(data["status"], "running")
+        self.assertEqual(data["iteration"], 10)
+        self.assertEqual(data["wandb_url"], "https://wandb.ai/x/beamdojo")
 
 
 class GymIdSourceTests(unittest.TestCase):
@@ -103,6 +147,18 @@ class GymIdSourceTests(unittest.TestCase):
             "Isaac-BeamDojo-Stage2-G1-v0",
         ]:
             self.assertIn(gym_id, text)
+
+    def test_stage2_catcher_and_ground_disable_are_wired(self):
+        root = Path(__file__).resolve().parents[1]
+        props = (root / "h1_cfg" / "scene_props.py").read_text()
+        common = (root / "h1_cfg" / "beamdojo_common.py").read_text()
+        mdp = (root / "h1_cfg" / "mdp.py").read_text()
+        self.assertIn("def catcher_cfg", props)
+        self.assertIn("CATCHER_Z", props)
+        self.assertIn("cfg.scene.catcher = catcher_cfg()", common)
+        self.assertIn("disable_ground_collision", common)
+        self.assertIn("def disable_ground_collision", mdp)
+        self.assertNotIn("No-op helper kept for wrappers", mdp)
 
 
 if __name__ == "__main__":

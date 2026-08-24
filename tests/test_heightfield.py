@@ -85,6 +85,22 @@ class BeamHeightfieldTests(unittest.TestCase):
         )
         np.testing.assert_allclose(n, [0.0])
 
+    def test_foothold_off_even_when_feet_are_on_the_plane(self):
+        """Imagined drop: XY off the beam counts even if PhysX feet stay at z=0."""
+        sx = np.array([[1.0, 1.02, 0.98]])
+        sy = np.array([[0.4, 0.41, 0.39]])
+        sz = np.zeros_like(sx)
+        n = foothold_off_count(
+            sx,
+            sy,
+            origin_x=np.array([0.0]),
+            origin_y=np.array([0.0]),
+            length=8.0,
+            width=0.20,
+            sample_z=sz,
+        )
+        np.testing.assert_allclose(n, [3.0])
+
     def test_stones_on_pad_and_gap(self):
         origin = np.array([0.0])
         on = stone_surface_z(

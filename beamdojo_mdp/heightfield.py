@@ -150,10 +150,12 @@ def foothold_off_count(
             on_z=on_z,
             off_z=off_z,
         )
-    if sample_z is None:
-        clearance = hz - on_z
-    else:
-        clearance = sample_z - hz
+    # Dual-terrain eq. 2: on/off is the *task* map at XY, not PhysX foot height.
+    # Standing on the Stage 1 plane beside the imagined beam must still count as
+    # off (feet stay near z=0 while off_z is -0.40). sample_z is accepted for
+    # callers but ignored so a raised Stage 2 beam does not hide lateral misses.
+    del sample_z
+    clearance = hz - on_z
     off = clearance < depth_threshold
     if _is_torch(off):
         return off.to(dtype=sample_x.dtype).sum(dim=-1)

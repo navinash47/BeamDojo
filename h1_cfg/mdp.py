@@ -193,7 +193,6 @@ def foothold_reward(
             depth_threshold=depth_threshold,
             on_z=env.beamdojo_on_z,
             off_z=env.beamdojo_off_z,
-            sample_z=pts[..., 2],
             terrain=env.beamdojo_terrain,
             stone_size=env.beamdojo_stone_size,
             gap=env.beamdojo_gap,
@@ -242,8 +241,30 @@ def tighten_beam_width(
     env.beamdojo_width[:] = w
 
 
-def record_foothold_extra(env: ManagerBasedRLEnv) -> None:
-    """No-op helper kept for wrappers that read env.beamdojo_foothold_step."""
-    env = _raw(env)
-    if not hasattr(env, "beamdojo_foothold_step"):
-        env.beamdojo_foothold_step = torch.zeros(env.num_envs, device=env.device)
+def disable_ground_collision(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor | None = None,
+    prim_paths: tuple[str, ...] = ("/World/ground", "/World/defaultGroundPlane"),
+) -> None:
+    """Turn off TerrainImporter plane collision so Stage 2 cannot walk beside the beam."""
+    del env, env_ids
+    try:
+        import omni.usd
+        from pxr import Usd, UsdPhysics
+    except ImportError:
+        return
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return
+    for path in prim_paths:
+        prim = stage.GetPrimAtPath(path)
+        if not prim or not prim.IsValid():
+            continue
+        for child in Usd.PrimRange(prim):
+            if child.HasAPI(UsdPhysics.CollisionAPI):
+                attr = UsdPhysics.CollisionAPI(child).GetCollisionEnabledAttr()
+                if attr:
+                    attr.Set(False)
+            phys = child.GetAttribute("physics:collisionEnabled")
+            if phys:
+                phys.Set(False)

@@ -117,6 +117,23 @@ def wandb_project_url(project: str = "beamdojo") -> str:
     return "https://wandb.ai"
 
 
+def live_wandb_url(project: str = "beamdojo") -> str:
+    """Prefer the active W&B run URL once wandb.init has run; else the project page."""
+    try:
+        import wandb
+
+        run = getattr(wandb, "run", None)
+        if run is not None:
+            url = getattr(run, "url", None)
+            if not url and hasattr(run, "get_url"):
+                url = run.get_url()
+            if url:
+                return str(url)
+    except Exception:
+        pass
+    return wandb_project_url(project)
+
+
 def apply_wandb_defaults(agent_cfg, args_cli) -> None:
     """Use W&B when a key is present unless the user picked another logger."""
     logger = getattr(args_cli, "logger", None)
@@ -138,7 +155,7 @@ def write_training_status(payload: dict) -> Path:
         "host": "lambda-a10" if Path("/lambda/nfs/beamdojo").is_dir() else "local",
         "wandb_project": os.environ.get("WANDB_PROJECT", "beamdojo"),
         "wandb_entity": os.environ.get("WANDB_ENTITY") or os.environ.get("WANDB_USERNAME") or None,
-        "wandb_url": wandb_project_url(os.environ.get("WANDB_PROJECT", "beamdojo")),
+        "wandb_url": live_wandb_url(os.environ.get("WANDB_PROJECT", "beamdojo")),
         **payload,
     }
     raw = json.dumps(body, indent=2) + "\n"
@@ -155,6 +172,42 @@ def write_training_status(payload: dict) -> Path:
         path.write_text(raw)
         written = path
     return written
+
+
+def attach_status_heartbeat(runner, payload: dict, *, every: int = 10) -> None:
+    """Rewrite gitignored training-status.json every ``every`` PPO iterations.
+
+    OnPolicyRunner.log is called once per iteration. Kingdom syncs this file into
+    the Research Lab; W&B remains the live metric webpage.
+    """
+    orig_log = getattr(runner, "log", None)
+    if not callable(orig_log):
+        return
+
+    def _log(*args, **kwargs):
+        result = orig_log(*args, **kwargs)
+        it = int(getattr(runner, "current_learning_iteration", 0) or 0)
+        if every > 0 and it % every != 0:
+            return result
+        project = payload.get("wandb_project") or os.environ.get("WANDB_PROJECT", "beamdojo")
+        log_dir = payload.get("log_dir")
+        ckpt = None
+        if log_dir:
+            candidate = os.path.join(str(log_dir), f"model_{it}.pt")
+            if os.path.isfile(candidate):
+                ckpt = candidate
+        write_training_status(
+            {
+                **payload,
+                "status": "running",
+                "iteration": it,
+                "wandb_url": live_wandb_url(project),
+                "checkpoint": ckpt or payload.get("checkpoint"),
+            }
+        )
+        return result
+
+    runner.log = _log
 
 
 class FootholdExtrasWrapper:

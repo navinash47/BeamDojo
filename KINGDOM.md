@@ -17,7 +17,7 @@ Lambda does not serve Isaac Sim on the public internet. Watch a run from the Mac
 2. **TensorBoard tunnel:** `ssh -L 6006:localhost:6006 lambda-beamdojo` then `tensorboard --logdir /lambda/nfs/beamdojo/logs --bind_all`.
 3. **Kingdom Research Lab** (`/?tab=research`): syncs `tracking/training-status.json` (gitignored; see the example file) plus proof mp4s.
 
-`scripts/cloud/train_stage1.sh` writes that status JSON and prints the W&B URL.
+`scripts/cloud/train_stage1.sh` writes that status JSON (and refreshes it every 10 PPO iters) and prints the W&B URL.
 
 ## Proof videos
 

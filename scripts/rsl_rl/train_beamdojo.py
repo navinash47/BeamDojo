@@ -196,23 +196,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
 
     env_cfg.log_dir = log_dir
 
+    status_body = {
+        "robot": args_cli.robot,
+        "stage": args_cli.stage,
+        "terrain": args_cli.terrain,
+        "task": args_cli.task,
+        "num_envs": int(env_cfg.scene.num_envs),
+        "max_iterations": int(agent_cfg.max_iterations),
+        "logger": getattr(agent_cfg, "logger", "tensorboard"),
+        "wandb_project": getattr(agent_cfg, "wandb_project", "beamdojo"),
+        "wandb_url": beamdojo_runtime.live_wandb_url(getattr(agent_cfg, "wandb_project", "beamdojo")),
+        "log_dir": log_dir,
+        "checkpoint": None,
+        "note": "Live curves are on W&B or TensorBoard. Checkpoints stay on NFS — do not git-commit .pt.",
+    }
     status_path = beamdojo_runtime.write_training_status(
-        {
-            "status": "running",
-            "robot": args_cli.robot,
-            "stage": args_cli.stage,
-            "terrain": args_cli.terrain,
-            "task": args_cli.task,
-            "num_envs": int(env_cfg.scene.num_envs),
-            "max_iterations": int(agent_cfg.max_iterations),
-            "iteration": 0,
-            "logger": getattr(agent_cfg, "logger", "tensorboard"),
-            "wandb_project": getattr(agent_cfg, "wandb_project", "beamdojo"),
-            "wandb_url": beamdojo_runtime.wandb_project_url(getattr(agent_cfg, "wandb_project", "beamdojo")),
-            "log_dir": log_dir,
-            "checkpoint": None,
-            "note": "Live curves are on W&B or TensorBoard. Checkpoints stay on NFS — do not git-commit .pt.",
-        }
+        {**status_body, "status": "running", "iteration": 0}
     )
     print(f"[INFO] Wrote training status: {status_path}")
 
@@ -252,6 +251,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
 
+    status_body["wandb_url"] = beamdojo_runtime.live_wandb_url(
+        getattr(agent_cfg, "wandb_project", "beamdojo")
+    )
+    beamdojo_runtime.write_training_status({**status_body, "status": "running", "iteration": 0})
+    beamdojo_runtime.attach_status_heartbeat(runner, status_body, every=10)
+
     print(f"Target iterations: {agent_cfg.max_iterations}")
     try:
         runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
@@ -259,18 +264,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
         ckpt = os.path.join(log_dir, f"model_{getattr(runner, 'current_learning_iteration', 0)}.pt")
         beamdojo_runtime.write_training_status(
             {
+                **status_body,
                 "status": "idle",
-                "robot": args_cli.robot,
-                "stage": args_cli.stage,
-                "terrain": args_cli.terrain,
-                "task": args_cli.task,
-                "num_envs": int(env_cfg.scene.num_envs),
-                "max_iterations": int(agent_cfg.max_iterations),
                 "iteration": int(getattr(runner, "current_learning_iteration", 0)),
-                "logger": getattr(agent_cfg, "logger", "tensorboard"),
-                "wandb_project": getattr(agent_cfg, "wandb_project", "beamdojo"),
-                "wandb_url": beamdojo_runtime.wandb_project_url(getattr(agent_cfg, "wandb_project", "beamdojo")),
-                "log_dir": log_dir,
+                "wandb_url": beamdojo_runtime.live_wandb_url(
+                    getattr(agent_cfg, "wandb_project", "beamdojo")
+                ),
                 "checkpoint": ckpt,
                 "note": f"Run finished. Copy {ckpt} off-box as insurance — never git-commit weights.",
             }

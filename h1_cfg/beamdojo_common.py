@@ -27,6 +27,7 @@ from h1_cfg.scene_props import (
     BEAM_WIDTH_EASY,
     BEAM_WIDTH_HARD,
     add_stepping_stones,
+    catcher_cfg,
     task_beam_cfg,
 )
 
@@ -226,9 +227,15 @@ def apply_stage2(cfg, spec: RobotSpec = H1, *, stones: bool = False) -> None:
         cfg.scene.task_beam = task_beam_cfg(collision=True, width=BEAM_WIDTH_EASY)
         terrain = "beam"
         start_w = BEAM_WIDTH_EASY
+    cfg.scene.catcher = catcher_cfg()
     apply_shared_locomotion(cfg, spec, stage=2)
     cfg.events.init_beamdojo.params["terrain"] = terrain
     cfg.events.init_beamdojo.params["width"] = start_w
+    cfg.events.disable_ground = EventTerm(
+        func=bd_mdp.disable_ground_collision,
+        mode="startup",
+        params={"prim_paths": ("/World/ground", "/World/defaultGroundPlane")},
+    )
 
     cfg.terminations.time_out = DoneTerm(func=mdp.time_out, time_out=True)
     cfg.terminations.base_height = DoneTerm(
