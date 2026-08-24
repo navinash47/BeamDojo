@@ -258,40 +258,66 @@ def inject_double_critic() -> None:
     opr.ActorCriticDouble = ActorCriticDouble
     opr.PPODoubleCritic = PPODoubleCritic
     _patch_runner_foot_optimizer(opr.OnPolicyRunner)
+    _patch_store_code_state(opr)
     sync_wandb_identity_env()
     _patch_wandb_writer()
 
 
+def _torch_load(path, map_location=None):
+    """Load a checkpoint on both old torch (no weights_only) and 2.6+."""
+    import torch
+
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
+
 def _patch_runner_foot_optimizer(runner_cls) -> None:
-    """Persist the foothold Adam state next to rsl-rl's loco optimizer."""
+    """Persist the foothold Adam state next to rsl-rl's loco optimizer.
+
+    rsl-rl 3.0.1 ``save()`` writes the ``.pt`` then calls ``writer.save_model``.
+    A W&B 503 after the file is on disk must not abort ``learn()`` at iter 0
+    (save_interval hits the first iteration). Same for the extra torch.load
+    used to splice in ``foot_optimizer_state_dict``.
+    """
     if getattr(runner_cls, "_beamdojo_foot_ckpt", False):
         return
     orig_save = runner_cls.save
     orig_load = runner_cls.load
 
     def save(self, path, infos=None):
-        orig_save(self, path, infos)
+        try:
+            orig_save(self, path, infos)
+        except Exception as exc:
+            if not os.path.isfile(path):
+                raise
+            print(
+                f"[WARN] runner.save logger upload failed ({type(exc).__name__}: {exc}). "
+                "Checkpoint is on disk; continuing learn()."
+            )
         foot = getattr(getattr(self, "alg", None), "foot_optimizer", None)
         if foot is None:
             return
-        import torch
+        try:
+            blob = _torch_load(path, map_location="cpu")
+            blob["foot_optimizer_state_dict"] = foot.state_dict()
+            import torch
 
-        blob = torch.load(path, map_location="cpu", weights_only=False)
-        blob["foot_optimizer_state_dict"] = foot.state_dict()
-        torch.save(blob, path)
+            torch.save(blob, path)
+        except Exception as exc:
+            print(f"[WARN] foothold optimizer not stored ({type(exc).__name__}: {exc})")
 
     def load(self, path, load_optimizer=True, map_location=None):
         infos = orig_load(self, path, load_optimizer=load_optimizer, map_location=map_location)
         foot = getattr(getattr(self, "alg", None), "foot_optimizer", None)
         if not load_optimizer or foot is None:
             return infos
-        import torch
-
-        blob = torch.load(path, map_location=map_location, weights_only=False)
-        state = blob.get("foot_optimizer_state_dict")
-        if not state:
-            return infos
         try:
+            blob = _torch_load(path, map_location=map_location)
+            state = blob.get("foot_optimizer_state_dict") if isinstance(blob, dict) else None
+            if not state:
+                return infos
             foot.load_state_dict(state)
         except Exception as exc:
             print(f"[WARN] Not loading foothold optimizer: {exc}")
@@ -300,6 +326,34 @@ def _patch_runner_foot_optimizer(runner_cls) -> None:
     runner_cls.save = save
     runner_cls.load = load
     runner_cls._beamdojo_foot_ckpt = True
+
+
+def _patch_store_code_state(opr) -> None:
+    """rsl-rl 3.0.1 dumps git status after the first PPO iter.
+
+    ``store_code_state`` only guards ``git.Repo()``. ``repo.git.status()`` still
+    raises on Lambda/Docker 'dubious ownership' and would abort ``learn()``
+    after Isaac boot and the first update.
+    """
+    orig = getattr(opr, "store_code_state", None)
+    if not callable(orig) or getattr(opr, "_beamdojo_store_code", False):
+        return
+
+    def store_code_state(logdir, repositories):
+        try:
+            return orig(logdir, repositories)
+        except Exception as exc:
+            print(f"[WARN] git diff upload skipped ({type(exc).__name__}: {exc})")
+            return []
+
+    opr.store_code_state = store_code_state
+    opr._beamdojo_store_code = True
+    try:
+        import rsl_rl.utils as utils
+
+        utils.store_code_state = store_code_state
+    except Exception:
+        pass
 
 
 def resolve_log_root(experiment_name: str) -> str:
@@ -335,6 +389,9 @@ def sync_wandb_identity_env() -> None:
     the entity so ``wandb.init`` lands in the same place Kingdom GraphQL queries.
     A blank ``WANDB_USERNAME=`` is set, so it is *not* a KeyError — ``wandb.init(entity="")``
     then aborts ``learn()`` after Isaac boot. Unset blanks.
+
+    ``WANDB_PROJECT`` is optional for the 3.0.1 writer (it reads ``cfg["wandb_project"]``),
+    but other wandb helpers KeyError if the env var is missing. Default it.
     """
     entity = (os.environ.get("WANDB_ENTITY") or "").strip()
     username = (os.environ.get("WANDB_USERNAME") or "").strip()
@@ -343,28 +400,80 @@ def sync_wandb_identity_env() -> None:
         os.environ["WANDB_USERNAME"] = chosen
         if not entity:
             os.environ["WANDB_ENTITY"] = chosen
-        return
-    if "WANDB_USERNAME" in os.environ:
+    elif "WANDB_USERNAME" in os.environ:
         del os.environ["WANDB_USERNAME"]
+    project = (os.environ.get("WANDB_PROJECT") or "").strip()
+    if project:
+        os.environ["WANDB_PROJECT"] = project
+    else:
+        os.environ["WANDB_PROJECT"] = "beamdojo"
+
+
+def _keep_wandb_call(label: str, fn, *args, **kwargs):
+    """W&B I/O must not abort PPO after Isaac boot (transient HTTP / JSON)."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:
+        print(f"[WARN] wandb {label} skipped ({type(exc).__name__}): {exc}")
+        return None
+
+
+def _as_log_scalar(value):
+    """wandb.log rejects GPU tensors from Episode/* means; TensorBoard accepts them."""
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return item()
+        except Exception:
+            pass
+    try:
+        import torch
+
+        if torch.is_tensor(value):
+            return value.detach().float().cpu().item()
+    except Exception:
+        pass
+    return value
 
 
 def _patch_wandb_writer() -> None:
-    """Keep a 10k CUDA run alive if Isaac cfg is not wandb-JSON-serializable."""
+    """Keep a 10k CUDA run alive if W&B JSON/HTTP fails after wandb.init."""
     try:
         from rsl_rl.utils.wandb_utils import WandbSummaryWriter
     except Exception:
         return
-    if getattr(WandbSummaryWriter, "_beamdojo_store_cfg", False):
+    if getattr(WandbSummaryWriter, "_beamdojo_keep_alive", False):
         return
-    orig = WandbSummaryWriter.store_config
+    orig_store = WandbSummaryWriter.store_config
+    orig_add = WandbSummaryWriter.add_scalar
+    orig_save_file = getattr(WandbSummaryWriter, "save_file", None)
+    orig_save_model = getattr(WandbSummaryWriter, "save_model", None)
 
     def store_config(self, env_cfg, runner_cfg, alg_cfg, policy_cfg):
-        try:
-            orig(self, env_cfg, runner_cfg, alg_cfg, policy_cfg)
-        except Exception as exc:
-            print(f"[WARN] wandb store_config skipped ({type(exc).__name__}): {exc}")
+        _keep_wandb_call("store_config", orig_store, self, env_cfg, runner_cfg, alg_cfg, policy_cfg)
+
+    def add_scalar(self, tag, scalar_value, *args, **kwargs):
+        return _keep_wandb_call(
+            "add_scalar",
+            orig_add,
+            self,
+            tag,
+            _as_log_scalar(scalar_value),
+            *args,
+            **kwargs,
+        )
 
     WandbSummaryWriter.store_config = store_config
+    WandbSummaryWriter.add_scalar = add_scalar
+    if callable(orig_save_file):
+        WandbSummaryWriter.save_file = lambda self, path, iter=None: _keep_wandb_call(
+            "save_file", orig_save_file, self, path, iter
+        )
+    if callable(orig_save_model):
+        WandbSummaryWriter.save_model = lambda self, model_path, iter: _keep_wandb_call(
+            "save_model", orig_save_model, self, model_path, iter
+        )
+    WandbSummaryWriter._beamdojo_keep_alive = True
     WandbSummaryWriter._beamdojo_store_cfg = True
 
 
@@ -438,6 +547,15 @@ def apply_wandb_defaults(agent_cfg, args_cli) -> None:
         agent_cfg.neptune_project = project
 
 
+def _safe_training_status(payload: dict) -> Path | None:
+    """Status JSON is for the Research Lab; never abort a live CUDA learn()."""
+    try:
+        return write_training_status(payload)
+    except Exception as exc:
+        print(f"[WARN] training-status.json write skipped ({type(exc).__name__}: {exc})")
+        return None
+
+
 def write_training_status(payload: dict) -> Path:
     """Write live-run JSON for Kingdom Research Lab (gitignored)."""
     project = str(payload.get("wandb_project") or os.environ.get("WANDB_PROJECT", "beamdojo"))
@@ -467,9 +585,12 @@ def write_training_status(payload: dict) -> Path:
         targets.append(nfs)
     written = targets[0]
     for path in targets:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(raw)
-        written = path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(raw)
+            written = path
+        except Exception as exc:
+            print(f"[WARN] training-status.json write skipped ({path}: {type(exc).__name__}: {exc})")
     return written
 
 
@@ -523,7 +644,7 @@ def attach_status_heartbeat(runner, payload: dict, *, every: int = 10) -> None:
                         "Falling back to TensorBoard so the 10k run still starts."
                     )
                     result = _fallback_tensorboard_writer(runner)
-            write_training_status(_status_from_runner(runner, payload))
+            _safe_training_status(_status_from_runner(runner, payload))
             return result
 
         runner._prepare_logging_writer = _prepare
@@ -533,21 +654,28 @@ def attach_status_heartbeat(runner, payload: dict, *, every: int = 10) -> None:
         return
 
     def _log(*args, **kwargs):
-        result = orig_log(*args, **kwargs)
+        try:
+            result = orig_log(*args, **kwargs)
+        except Exception as exc:
+            print(f"[WARN] runner.log skipped ({type(exc).__name__}: {exc})")
+            result = None
         it = int(getattr(runner, "current_learning_iteration", 0) or 0)
         if every > 0 and it % every != 0:
             return result
         locs = args[0] if args else kwargs.get("locs")
-        metrics = extract_live_metrics(
-            locs if isinstance(locs, dict) else {},
-            num_envs=int(payload.get("num_envs") or 0),
-            num_steps=int(
-                getattr(runner, "num_steps_per_env", 0) or payload.get("num_steps_per_env") or 0
-            ),
-        )
-        payload.update(metrics)
-        append_history(payload, metrics, it)
-        write_training_status(_status_from_runner(runner, payload, iteration=it))
+        try:
+            metrics = extract_live_metrics(
+                locs if isinstance(locs, dict) else {},
+                num_envs=int(payload.get("num_envs") or 0),
+                num_steps=int(
+                    getattr(runner, "num_steps_per_env", 0) or payload.get("num_steps_per_env") or 0
+                ),
+            )
+            payload.update(metrics)
+            append_history(payload, metrics, it)
+            _safe_training_status(_status_from_runner(runner, payload, iteration=it))
+        except Exception as exc:
+            print(f"[WARN] live-status heartbeat skipped ({type(exc).__name__}: {exc})")
         return result
 
     runner.log = _log

@@ -18,5 +18,6 @@ fi
 if [[ -z "${WANDB_USERNAME:-}" ]]; then
   unset WANDB_USERNAME || true
 fi
+export WANDB_PROJECT="${WANDB_PROJECT:-beamdojo}"
 export PYTHONPATH="/workspace/beamdojo:/workspace/isaaclab/source/isaaclab:/workspace/isaaclab/source/isaaclab_assets:/workspace/isaaclab/source/isaaclab_tasks:/workspace/isaaclab/source/isaaclab_rl:${PYTHONPATH:-}"
 cd /workspace/beamdojo/scripts/rsl_rl

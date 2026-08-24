@@ -180,6 +180,11 @@ class WandbUrlTests(unittest.TestCase):
             self.rt.sync_wandb_identity_env()
             self.assertEqual(os.environ["WANDB_USERNAME"], "team")
 
+    def test_sync_wandb_defaults_project(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.rt.sync_wandb_identity_env()
+            self.assertEqual(os.environ["WANDB_PROJECT"], "beamdojo")
+
     def test_live_identity_reads_entity_from_run(self):
         fake = mock.MagicMock()
         fake.run = mock.MagicMock()
@@ -370,6 +375,124 @@ class TrainingStatusTests(unittest.TestCase):
         self.assertEqual(data["status"], "idle")
         self.assertEqual(data["note"], "unit idle")
 
+    def test_status_write_skips_unwritable_extra_target(self):
+        rt = self.rt
+        with tempfile.TemporaryDirectory() as tmp:
+            blocked = Path(tmp) / "blocked"
+            blocked.write_text("not a directory")
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(
+                    os.environ,
+                    {"WANDB_PROJECT": "beamdojo", "BEAMDOJO_LOG_ROOT": str(blocked)},
+                    clear=True,
+                ):
+                    path = rt.write_training_status({"status": "idle", "note": "nfs skip"})
+            data = json.loads(path.read_text())
+        self.assertEqual(data["status"], "idle")
+        self.assertEqual(data["note"], "nfs skip")
+
+    def test_heartbeat_survives_status_write_error(self):
+        rt = self.rt
+
+        class Runner:
+            current_learning_iteration = 10
+
+            def log(self, locs):
+                return locs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo"}, clear=True):
+                    runner = Runner()
+                    rt.attach_status_heartbeat(runner, {"wandb_project": "beamdojo"}, every=10)
+                    with mock.patch.object(rt, "write_training_status", side_effect=OSError("nfs down")):
+                        self.assertEqual(runner.log({"it": 10, "rewbuffer": [1.0]}), {"it": 10, "rewbuffer": [1.0]})
+
+    def test_keep_wandb_call_swallows_http_errors(self):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("wandb.log 503")
+
+        self.assertIsNone(self.rt._keep_wandb_call("add_scalar", boom, 1))
+
+    def test_as_log_scalar_uses_item(self):
+        class Tensorish:
+            def item(self):
+                return 0.25
+
+        self.assertEqual(self.rt._as_log_scalar(Tensorish()), 0.25)
+        self.assertEqual(self.rt._as_log_scalar(3.5), 3.5)
+
+    def test_heartbeat_survives_log_error(self):
+        rt = self.rt
+
+        class Runner:
+            current_learning_iteration = 10
+
+            def log(self, locs):
+                raise RuntimeError("add_scalar 503")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo", "WANDB_ENTITY": "x"}, clear=True):
+                    runner = Runner()
+                    rt.attach_status_heartbeat(runner, {"wandb_project": "beamdojo"}, every=10)
+                    self.assertIsNone(runner.log({"it": 10, "rewbuffer": [2.0]}))
+                    data = json.loads((Path(tmp) / "tracking" / "training-status.json").read_text())
+        self.assertEqual(data["status"], "running")
+        self.assertAlmostEqual(data["mean_reward"], 2.0)
+
+    def test_save_survives_logger_upload_error(self):
+        rt = self.rt
+
+        class Runner:
+            def save(self, path, infos=None):
+                Path(path).write_bytes(b"ckpt")
+                raise RuntimeError("wandb.save 503")
+
+            def load(self, path, load_optimizer=True, map_location=None):
+                return {"ok": True}
+
+        rt._patch_runner_foot_optimizer(Runner)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "model_0.pt")
+            runner = Runner()
+            runner.alg = type("Alg", (), {"foot_optimizer": None})()
+            runner.save(path)
+            self.assertTrue(Path(path).is_file())
+
+    def test_save_survives_broken_foothold_splice(self):
+        rt = self.rt
+
+        class Foot:
+            def state_dict(self):
+                return {"x": 1}
+
+        class Runner:
+            def save(self, path, infos=None):
+                Path(path).write_bytes(b"not-a-pickle")
+
+            def load(self, path, load_optimizer=True, map_location=None):
+                return None
+
+        rt._patch_runner_foot_optimizer(Runner)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "model_0.pt")
+            runner = Runner()
+            runner.alg = type("Alg", (), {"foot_optimizer": Foot()})()
+            runner.save(path)
+            self.assertEqual(Path(path).read_bytes(), b"not-a-pickle")
+
+    def test_store_code_state_survives_dubious_ownership(self):
+        class FakeOpr:
+            pass
+
+        def boom(*_a, **_k):
+            raise RuntimeError("detected dubious ownership")
+
+        FakeOpr.store_code_state = boom
+        self.rt._patch_store_code_state(FakeOpr)
+        self.assertEqual(FakeOpr.store_code_state("logs", []), [])
+
     def test_wrapper_writes_log_and_top_level_foothold(self):
         rt = self.rt
 
@@ -501,6 +624,7 @@ class GymIdSourceTests(unittest.TestCase):
         env_sh = (root / "scripts" / "cloud" / "_env.sh").read_text()
         self.assertIn("WANDB_USERNAME", env_sh)
         self.assertIn("WANDB_ENTITY", env_sh)
+        self.assertIn('WANDB_PROJECT="${WANDB_PROJECT:-beamdojo}"', env_sh)
         play = (root / "scripts" / "rsl_rl" / "play_beamdojo.py").read_text()
         self.assertIn("pick_play_checkpoint", play)
         self.assertIn("beamdojo_runtime.runner_cfg_dict(agent_cfg)", play)
@@ -514,6 +638,10 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("--resume", stage2)
         relaunch = (root / "scripts" / "cloud" / "after_relaunch.sh").read_text()
         self.assertIn("train_stage2.sh", relaunch)
+        self.assertIn("BEAMDOJO_GIT_REF", relaunch)
+        self.assertIn("return RigidObjectCfg(", relaunch)
+        self.assertIn("sanitize_rsl_rl_train_cfg", relaunch)
+        self.assertIn("_patch_store_code_state", relaunch)
 
     def test_stage2_catcher_and_ground_disable_are_wired(self):
         root = Path(__file__).resolve().parents[1]
