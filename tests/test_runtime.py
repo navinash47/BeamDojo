@@ -66,6 +66,68 @@ class TaskRoutingTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"LOAD_EXPERIMENT": "beamdojo_h1_stage2"}, clear=False):
             self.assertEqual(self.rt.resolve_load_experiment(2, "h1"), "beamdojo_h1_stage2")
 
+    def test_stage2_fine_tunes_stage1_flag(self):
+        self.assertTrue(self.rt.stage2_fine_tunes_stage1(2, "h1"))
+        self.assertTrue(self.rt.stage2_fine_tunes_stage1(2, "g1"))
+        self.assertFalse(self.rt.stage2_fine_tunes_stage1(1, "h1"))
+        self.assertFalse(
+            self.rt.stage2_fine_tunes_stage1(2, "h1", load_experiment="beamdojo_h1_stage2")
+        )
+
+    def test_resume_picks_highest_iteration_not_missing_9999(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp) / "2026-08-24_12-00-00"
+            run.mkdir()
+            (run / "model_0.pt").write_text("a")
+            (run / "model_4.pt").write_text("b")
+            (run / "model_10.pt").write_text("c")
+            path = self.rt.resolve_resume_checkpoint(tmp)
+        self.assertTrue(path.endswith("model_10.pt"))
+
+    def test_resume_pinned_missing_9999_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp) / "smoke"
+            run.mkdir()
+            (run / "model_4.pt").write_text("b")
+            with self.assertRaises(ValueError):
+                self.rt.resolve_resume_checkpoint(tmp, None, "model_9999.pt")
+
+    def test_resume_picks_newer_run_by_mtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = Path(tmp) / "2026-08-01_00-00-00"
+            new = Path(tmp) / "2026-08-24_12-00-00"
+            old.mkdir()
+            new.mkdir()
+            (old / "model_9999.pt").write_text("old")
+            (new / "model_4.pt").write_text("new")
+            os.utime(old, (1, 1))
+            os.utime(new, (2_000_000_000, 2_000_000_000))
+            path = self.rt.resolve_resume_checkpoint(tmp)
+        self.assertTrue(path.endswith("model_4.pt"))
+        self.assertIn("2026-08-24_12-00-00", path)
+
+    def test_play_prefers_stage2_checkpoint_when_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s1 = Path(tmp) / "rsl_rl" / "beamdojo_h1_stage1" / "run1"
+            s2 = Path(tmp) / "rsl_rl" / "beamdojo_h1_stage2" / "run2"
+            s1.mkdir(parents=True)
+            s2.mkdir(parents=True)
+            (s1 / "model_4.pt").write_text("s1")
+            (s2 / "model_99.pt").write_text("s2")
+            with mock.patch.dict(os.environ, {"BEAMDOJO_LOG_ROOT": tmp, "LOAD_EXPERIMENT": ""}, clear=False):
+                path = self.rt.pick_play_checkpoint(2, "h1")
+        self.assertTrue(path.endswith("model_99.pt"))
+
+    def test_play_falls_back_to_stage1_when_stage2_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s1 = Path(tmp) / "rsl_rl" / "beamdojo_h1_stage1" / "run1"
+            s1.mkdir(parents=True)
+            (s1 / "model_4.pt").write_text("s1")
+            with mock.patch.dict(os.environ, {"BEAMDOJO_LOG_ROOT": tmp, "LOAD_EXPERIMENT": ""}, clear=False):
+                path = self.rt.pick_play_checkpoint(2, "h1")
+        self.assertTrue(path.endswith("model_4.pt"))
+        self.assertIn("beamdojo_h1_stage1", path)
+
 
 class WandbUrlTests(unittest.TestCase):
     @classmethod
@@ -284,8 +346,18 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("BeamDojoG1Stage2PPORunnerCfg", g1s2)
         train = (root / "scripts" / "rsl_rl" / "train_beamdojo.py").read_text()
         self.assertIn("resolve_load_log_root", train)
+        self.assertIn("resolve_resume_checkpoint", train)
+        self.assertIn("stage2_fine_tunes_stage1", train)
+        self.assertIn("current_learning_iteration = 0", train)
+        play = (root / "scripts" / "rsl_rl" / "play_beamdojo.py").read_text()
+        self.assertIn("pick_play_checkpoint", play)
         stage2 = (root / "scripts" / "cloud" / "train_stage2.sh").read_text()
         self.assertIn("beamdojo_${ROBOT}_stage1", stage2)
+        self.assertNotIn("model_9999.pt", stage2)
+        self.assertNotIn("LOAD_RUN:?", stage2)
+        self.assertIn("--resume", stage2)
+        relaunch = (root / "scripts" / "cloud" / "after_relaunch.sh").read_text()
+        self.assertIn("train_stage2.sh", relaunch)
 
     def test_stage2_catcher_and_ground_disable_are_wired(self):
         root = Path(__file__).resolve().parents[1]

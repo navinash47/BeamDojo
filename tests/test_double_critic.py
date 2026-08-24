@@ -43,6 +43,16 @@ class DoubleCriticModuleTests(unittest.TestCase):
         self.assertIn("return False", src)
         self.assertLess(src.find("return False"), src.rfind("return True"))
 
+    def test_foothold_optimizer_clears_grads_before_loco_update(self):
+        import beamdojo_agents.double_critic as dc
+
+        src = inspect.getsource(dc.PPODoubleCritic._update_foothold_critic)
+        step_at = src.find("self.foot_optimizer.step()")
+        clear_at = src.rfind("self.foot_optimizer.zero_grad")
+        self.assertGreater(step_at, -1)
+        self.assertGreater(clear_at, step_at)
+        self.assertIn("set_to_none=True", src[clear_at:])
+
 
 if __name__ == "__main__":
     unittest.main()

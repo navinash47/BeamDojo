@@ -7,7 +7,7 @@
 
 ## Next 3 tasks
 1. A10 is **terminated when idle** (Lambda has no pause that keeps the VM). Run `bash scripts/cloud/mark_idle.sh` then confirm `model_*.pt` on `/lambda/nfs/beamdojo/logs` before terminate; keep the `beamdojo` filesystem.
-2. Next GPU session: same region, attach NFS at launch, then `bash scripts/cloud/after_relaunch.sh` (Stage 1, 1024 envs, 10k iters, `--logger wandb`). Stage 2: `LOAD_RUN=<stage1-run-folder> bash scripts/cloud/train_stage2.sh` — that folder lives under `logs/rsl_rl/beamdojo_<robot>_stage1`, not stage2.
+2. Next GPU session: same region, attach NFS at launch, then `bash scripts/cloud/after_relaunch.sh` (Stage 1, 1024 envs, 10k iters, `--logger wandb`). Stage 2: `STAGE=2 bash scripts/cloud/after_relaunch.sh` loads the latest `model_*.pt` under `logs/rsl_rl/beamdojo_<robot>_stage1` (override with `LOAD_RUN` / `CHECKPOINT`; continue an interrupted Stage 2 with `LOAD_EXPERIMENT=beamdojo_h1_stage2`).
 3. After Stage 1 walks the imagined beam: Stage 2 (`train_stage2.sh`) then G1 (`--robot g1`). Copy NFS checkpoints off-box — never git-commit `.pt`.
 
 ## Live training (browser)

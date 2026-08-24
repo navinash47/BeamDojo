@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run ON a new Lambda A10 after attach of the beamdojo NFS. Does not launch a GPU from a laptop.
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0") && pwd)"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT/_env.sh"
 
@@ -30,6 +30,7 @@ echo "Starting Stage ${STAGE} ${ROBOT:-h1} on CUDA."
 echo "Live curves: Weights & Biases (printed by train_stage*.sh)."
 echo "Kingdom Research Lab polls tracking/training-status.json — rsync that file to the Mac or open the cloud tunnel."
 if [[ "$STAGE" == "2" ]]; then
+  echo "Stage 2 loads the latest Stage 1 checkpoint. Override with LOAD_RUN, CHECKPOINT, or LOAD_EXPERIMENT."
   exec "$ROOT/train_stage2.sh"
 fi
 exec "$ROOT/train_stage1.sh"

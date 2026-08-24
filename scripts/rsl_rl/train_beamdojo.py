@@ -114,7 +114,6 @@ from isaaclab.utils.io import dump_yaml
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 
 import isaaclab_tasks  # noqa: F401
-from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -219,12 +218,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
 
     env = None
     runner = None
+    resume_path = None
     try:
-        env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
-
-        if isinstance(env.unwrapped, DirectMARLEnv):
-            env = multi_agent_to_single_agent(env)
-
         if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
             load_root = beamdojo_runtime.resolve_load_log_root(
                 args_cli.stage,
@@ -232,7 +227,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
                 load_experiment=getattr(args_cli, "load_experiment", None),
             )
             print(f"[INFO] Resume checkpoints from: {load_root}")
-            resume_path = get_checkpoint_path(load_root, agent_cfg.load_run, agent_cfg.load_checkpoint)
+            resume_path = beamdojo_runtime.resolve_resume_checkpoint(
+                load_root,
+                getattr(agent_cfg, "load_run", None),
+                getattr(agent_cfg, "load_checkpoint", None),
+            )
+            print(f"[INFO] Resolved checkpoint: {resume_path}")
+            status_body["checkpoint"] = resume_path
+
+        env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+        if isinstance(env.unwrapped, DirectMARLEnv):
+            env = multi_agent_to_single_agent(env)
 
         if args_cli.video:
             video_kwargs = {
@@ -255,9 +261,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
         else:
             raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
         runner.add_git_repo_to_log(__file__)
-        if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
+        if resume_path:
             print(f"[INFO]: Loading model checkpoint from: {resume_path}")
             runner.load(resume_path)
+            if beamdojo_runtime.stage2_fine_tunes_stage1(
+                args_cli.stage,
+                args_cli.robot,
+                load_experiment=getattr(args_cli, "load_experiment", None),
+            ):
+                runner.current_learning_iteration = 0
+                print("[INFO] Stage 2 fine-tune: Stage 1 weights loaded, PPO iteration reset to 0.")
 
         dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
         dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
@@ -265,7 +278,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
         status_body["wandb_url"] = beamdojo_runtime.live_wandb_url(
             getattr(agent_cfg, "wandb_project", "beamdojo")
         )
-        beamdojo_runtime.write_training_status({**status_body, "status": "running", "iteration": 0})
+        it0 = int(getattr(runner, "current_learning_iteration", 0) or 0)
+        beamdojo_runtime.write_training_status({**status_body, "status": "running", "iteration": it0})
         beamdojo_runtime.attach_status_heartbeat(runner, status_body, every=10)
 
         print(f"Target iterations: {agent_cfg.max_iterations}")

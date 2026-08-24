@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -88,6 +89,86 @@ def resolve_load_experiment(stage: int, robot: str, *, load_experiment: str | No
     if int(stage) >= 2:
         return experiment_name(1, robot)
     return experiment_name(stage, robot)
+
+
+DEFAULT_LOAD_RUN = ".*"
+DEFAULT_LOAD_CHECKPOINT = r"model_.*.pt"
+
+
+def stage2_fine_tunes_stage1(
+    stage: int,
+    robot: str,
+    *,
+    load_experiment: str | None = None,
+) -> bool:
+    """True when Stage 2 is loading Stage 1 weights (not continuing Stage 2)."""
+    if int(stage) < 2:
+        return False
+    return resolve_load_experiment(stage, robot, load_experiment=load_experiment) == experiment_name(
+        1, robot
+    )
+
+
+def resolve_resume_checkpoint(
+    log_root: str | os.PathLike,
+    load_run: str | None = None,
+    load_checkpoint: str | None = None,
+) -> str:
+    """Pick a ``model_*.pt`` under ``log_root``.
+
+    Isaac Lab 2.3.2 ``get_checkpoint_path(..., sort_alpha=True)`` sorts run
+    folders alphabetically (fine for ``YYYY-MM-DD_HH-MM-SS``) and checkpoints
+    with a padded-filename hack. We sort runs by mtime and checkpoints by the
+    trailing iteration number so a 5-iter smoke (``model_4.pt``) wins over a
+    missing ``model_9999.pt``, and ``model_10.pt`` wins over ``model_9.pt``.
+
+    ``load_run`` / ``load_checkpoint`` are Isaac Lab regexes (``re.match``).
+    Defaults match ``RslRlBaseRunnerCfg`` (``.*`` / ``model_.*.pt``).
+    """
+    root = Path(log_root)
+    if not root.is_dir():
+        raise ValueError(f"No runs present in the directory: '{root}' match: '{load_run or DEFAULT_LOAD_RUN}'.")
+    run_pat = (load_run or "").strip() or DEFAULT_LOAD_RUN
+    ckpt_pat = (load_checkpoint or "").strip() or DEFAULT_LOAD_CHECKPOINT
+    runs = [path for path in root.iterdir() if path.is_dir() and re.match(run_pat, path.name)]
+    if not runs:
+        raise ValueError(f"No runs present in the directory: '{root}' match: '{run_pat}'.")
+    run_dir = max(runs, key=lambda path: path.stat().st_mtime)
+    models = [path for path in run_dir.iterdir() if path.is_file() and re.match(ckpt_pat, path.name)]
+    if not models:
+        raise ValueError(f"No checkpoints in the directory: '{run_dir}' match '{ckpt_pat}'.")
+    chosen = max(models, key=_checkpoint_sort_key)
+    return str(chosen.resolve())
+
+
+def _checkpoint_sort_key(path: Path) -> tuple[int, float]:
+    digits = re.findall(r"\d+", path.name)
+    iteration = int(digits[-1]) if digits else -1
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return (iteration, mtime)
+
+
+def pick_play_checkpoint(
+    stage: int,
+    robot: str,
+    *,
+    load_run: str | None = None,
+    load_checkpoint: str | None = None,
+    load_experiment: str | None = None,
+) -> str:
+    """Play: prefer a Stage 2 run when one exists, else the Stage 1 fine-tune source."""
+    load_root = resolve_load_log_root(stage, robot, load_experiment=load_experiment)
+    override = (load_experiment or os.environ.get("LOAD_EXPERIMENT") or "").strip()
+    if int(stage) >= 2 and not override:
+        stage2_root = resolve_log_root(experiment_name(stage, robot))
+        try:
+            return resolve_resume_checkpoint(stage2_root, load_run, load_checkpoint)
+        except ValueError:
+            pass
+    return resolve_resume_checkpoint(load_root, load_run, load_checkpoint)
 
 
 def ensure_beamdojo_registered() -> None:

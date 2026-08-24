@@ -99,7 +99,6 @@ from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_che
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx
 
 import isaaclab_tasks  # noqa: F401
-from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 # PLACEHOLDER: Extension template (do not remove this comment)
@@ -137,23 +136,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     elif args_cli.checkpoint:
         resume_path = retrieve_file_path(args_cli.checkpoint)
     else:
-        load_root = beamdojo_runtime.resolve_load_log_root(
+        resume_path = beamdojo_runtime.pick_play_checkpoint(
             args_cli.stage,
             args_cli.robot,
+            load_run=getattr(agent_cfg, "load_run", None),
+            load_checkpoint=getattr(agent_cfg, "load_checkpoint", None),
             load_experiment=getattr(args_cli, "load_experiment", None),
         )
-        if args_cli.stage >= 2 and not getattr(args_cli, "load_experiment", None):
-            # Prefer a Stage 2 run when one exists; else fine-tune source (Stage 1).
-            stage2_root = beamdojo_runtime.resolve_log_root(
-                beamdojo_runtime.experiment_name(args_cli.stage, args_cli.robot)
-            )
-            try:
-                resume_path = get_checkpoint_path(stage2_root, agent_cfg.load_run, agent_cfg.load_checkpoint)
-            except ValueError:
-                print(f"[INFO] No Stage 2 checkpoint in {stage2_root}; loading Stage 1 from {load_root}")
-                resume_path = get_checkpoint_path(load_root, agent_cfg.load_run, agent_cfg.load_checkpoint)
-        else:
-            resume_path = get_checkpoint_path(load_root, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
     log_dir = os.path.dirname(resume_path)
 

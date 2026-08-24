@@ -183,6 +183,9 @@ class PPODoubleCritic(PPO):
         extra.backward()
         nn.utils.clip_grad_norm_(self.policy.critic_foothold.parameters(), self.max_grad_norm)
         self.foot_optimizer.step()
+        # Parent PPO.update() clips all policy.parameters(), including leftover
+        # critic_foothold grads, which would shrink loco steps. Drop them here.
+        self.foot_optimizer.zero_grad(set_to_none=True)
         return float(extra.item())
 
     def update(self):
