@@ -216,6 +216,36 @@ class TrainingStatusTests(unittest.TestCase):
             self.assertEqual(data["wandb_url"], "https://wandb.ai/x/beamdojo")
             self.assertIn("updated", data)
 
+    def test_write_boot_status_is_unknown_not_running(self):
+        rt = self.rt
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo", "WANDB_API_KEY": "k"}, clear=True):
+                    path = rt.write_boot_status(stage=1, robot="h1", terrain="beam")
+            data = json.loads(path.read_text())
+        self.assertEqual(data["status"], "unknown")
+        self.assertEqual(data["task"], "Isaac-BeamDojo-Stage1-H1-v0")
+        self.assertEqual(data["logger"], "wandb")
+        self.assertIn("Not a live W&B run yet", data["note"])
+        self.assertNotEqual(data["status"], "running")
+
+    def test_clear_stale_distributed_env_unsets_world_size(self):
+        with mock.patch.dict(os.environ, {"WORLD_SIZE": "8", "RANK": "0", "LOCAL_RANK": "0"}, clear=False):
+            cleared = self.rt.clear_stale_distributed_env(distributed=False)
+            self.assertIn("WORLD_SIZE", cleared)
+            self.assertNotIn("WORLD_SIZE", os.environ)
+            self.assertNotIn("RANK", os.environ)
+
+    def test_clear_stale_distributed_env_keeps_single_process(self):
+        with mock.patch.dict(os.environ, {"WORLD_SIZE": "1"}, clear=False):
+            self.assertEqual(self.rt.clear_stale_distributed_env(distributed=False), [])
+            self.assertEqual(os.environ["WORLD_SIZE"], "1")
+
+    def test_clear_stale_distributed_env_respects_flag(self):
+        with mock.patch.dict(os.environ, {"WORLD_SIZE": "2", "RANK": "1"}, clear=False):
+            self.assertEqual(self.rt.clear_stale_distributed_env(distributed=True), [])
+            self.assertEqual(os.environ["WORLD_SIZE"], "2")
+
     def test_heartbeat_writes_every_n_iters(self):
         rt = self.rt
         logs = []
@@ -903,6 +933,13 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("Not a live W&B run yet", train)
         self.assertIn('"status": "unknown"', train)
         self.assertNotIn('{**status_body, "status": "running", "iteration": 0}', train)
+        self.assertIn("write_boot_status", train)
+        self.assertIn("clear_stale_distributed_env", train)
+        self.assertLess(train.index("write_boot_status"), train.index("app_launcher = AppLauncher(args_cli)"))
+        self.assertLess(
+            train.index("clear_stale_distributed_env"),
+            train.index("app_launcher = AppLauncher(args_cli)"),
+        )
         runtime = (root / "scripts" / "rsl_rl" / "beamdojo_runtime.py").read_text()
         self.assertIn("def _patch_hydra_none_from_dict", runtime)
         self.assertIn("_patch_hydra_none_from_dict()", runtime)
@@ -916,6 +953,7 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("beamdojo_runtime.runner_cfg_dict(agent_cfg)", play)
         self.assertIn("reassert_gpu_env_cfg(env_cfg)", play)
         self.assertLess(play.index("reassert_gpu_env_cfg(env_cfg)"), play.index("gym.make("))
+        self.assertIn("clear_stale_distributed_env", play)
         self.assertIn("beamdojo_runtime.runner_cfg_dict(agent_cfg)", train)
         self.assertNotIn("OnPolicyRunner(env, agent_cfg.to_dict()", train)
         self.assertNotIn("OnPolicyRunner(env, agent_cfg.to_dict()", play)
@@ -933,6 +971,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("sanitize_ep_infos_for_rsl_log", relaunch)
         self.assertIn("reassert_gpu_env_cfg", relaunch)
         self.assertIn("_patch_wandb_init_retry", relaunch)
+        self.assertIn("write_boot_status", relaunch)
+        self.assertIn("clear_stale_distributed_env", relaunch)
         self.assertIn('checkout -f -B "$REF" "origin/${REF}"', relaunch)
         self.assertIn("Never git clean", relaunch)
         self.assertNotIn("git clean", relaunch.replace("Never git clean", ""))

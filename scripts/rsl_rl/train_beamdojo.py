@@ -62,6 +62,30 @@ if args_cli.task is None:
 if args_cli.video:
     args_cli.enable_cameras = True
 
+beamdojo_runtime.clear_stale_distributed_env(distributed=bool(getattr(args_cli, "distributed", False)))
+_boot_payload = {
+    "robot": args_cli.robot,
+    "stage": args_cli.stage,
+    "terrain": args_cli.terrain,
+    "task": args_cli.task,
+    "num_envs": int(args_cli.num_envs or 1024),
+    "max_iterations": int(args_cli.max_iterations or STAGE1_DEFAULT_MAX_ITERS),
+}
+beamdojo_runtime.install_status_signal_hooks(_boot_payload)
+_boot_path = beamdojo_runtime.write_boot_status(
+    stage=args_cli.stage,
+    robot=args_cli.robot,
+    terrain=args_cli.terrain,
+    task=args_cli.task,
+    num_envs=_boot_payload["num_envs"],
+    max_iterations=_boot_payload["max_iterations"],
+    note=(
+        "Starting Isaac Sim AppLauncher. gym.make / wandb.init come after this. "
+        "Not a live W&B run yet."
+    ),
+)
+print(f"[INFO] Wrote boot training-status (unknown) before Isaac starts: {_boot_path}")
+
 sys.argv = [sys.argv[0]] + hydra_args
 
 app_launcher = AppLauncher(args_cli)

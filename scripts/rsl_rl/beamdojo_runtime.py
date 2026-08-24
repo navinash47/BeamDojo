@@ -61,6 +61,84 @@ def require_cuda() -> None:
         raise SystemExit("No CUDA devices found. Refusing to continue.")
 
 
+_DISTRIBUTED_ENV_KEYS = (
+    "WORLD_SIZE",
+    "RANK",
+    "LOCAL_RANK",
+    "GROUP_RANK",
+    "LOCAL_WORLD_SIZE",
+    "MASTER_ADDR",
+    "MASTER_PORT",
+)
+
+
+def clear_stale_distributed_env(*, distributed: bool = False) -> list[str]:
+    """Drop leftover torchrun env so OnPolicyRunner does not NCCL-init.
+
+    rsl-rl 3.0.1 treats ``WORLD_SIZE > 1`` as multi-GPU and calls
+    ``init_process_group`` in ``OnPolicyRunner.__init__`` — before ``learn()``
+    and ``wandb.init``. A stale Lambda/Docker ``WORLD_SIZE`` kills the 10k
+    with no live W&B page.
+    """
+    if distributed:
+        return []
+    world = os.environ.get("WORLD_SIZE")
+    try:
+        world_n = int(str(world).strip()) if world is not None and str(world).strip() != "" else 1
+    except ValueError:
+        world_n = 1
+        os.environ.pop("WORLD_SIZE", None)
+    if world_n <= 1:
+        return []
+    cleared: list[str] = []
+    for key in _DISTRIBUTED_ENV_KEYS:
+        if key not in os.environ:
+            continue
+        print(
+            f"[WARN] Unsetting leftover {key}={os.environ[key]!r} (not --distributed). "
+            "rsl-rl 3.0.1 would NCCL-init and die before wandb.init."
+        )
+        os.environ.pop(key, None)
+        cleared.append(key)
+    return cleared
+
+
+def write_boot_status(
+    *,
+    stage: int = 1,
+    robot: str = "h1",
+    terrain: str = "beam",
+    task: str | None = None,
+    note: str | None = None,
+    **extra,
+):
+    """Isaac-free status write so Research Lab is not Idle during AppLauncher."""
+    robot = str(robot).lower()
+    terrain = str(terrain).lower()
+    if not task:
+        try:
+            task = resolve_task(int(stage), robot, terrain)
+        except ValueError:
+            task = None
+    return write_training_status(
+        {
+            "status": "unknown",
+            "robot": robot,
+            "stage": int(stage),
+            "terrain": terrain,
+            "task": task,
+            "iteration": 0,
+            "logger": "wandb" if os.environ.get("WANDB_API_KEY", "").strip() else "tensorboard",
+            "note": note
+            or (
+                "Isaac Sim AppLauncher starting on CUDA. Not a live W&B run yet — "
+                "status becomes running when learn() opens the logger."
+            ),
+            **extra,
+        }
+    )
+
+
 def resolve_task(stage: int, robot: str, terrain: str = "beam", *, play: bool = False) -> str:
     table = PLAY_IDS if play else TASK_IDS
     key = (int(stage), str(robot).lower(), str(terrain).lower())

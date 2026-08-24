@@ -60,6 +60,8 @@ if args_cli.task is None:
 if args_cli.video:
     args_cli.enable_cameras = True
 
+beamdojo_runtime.clear_stale_distributed_env(distributed=False)
+
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
 

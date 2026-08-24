@@ -55,6 +55,14 @@ if ! grep -q "def _patch_wandb_init_retry" "$REPO/scripts/rsl_rl/beamdojo_runtim
   echo "beamdojo_runtime.py is missing wandb.init retry. Pull ${REF} or a single Lambda 503 falls back to TensorBoard with no live W&B page." >&2
   exit 1
 fi
+if ! grep -q "def write_boot_status" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing write_boot_status. Pull ${REF} or Research Lab stays Idle for the whole Isaac AppLauncher boot." >&2
+  exit 1
+fi
+if ! grep -q "def clear_stale_distributed_env" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover WORLD_SIZE clear. Pull ${REF} or rsl-rl NCCL-inits before wandb.init." >&2
+  exit 1
+fi
 if ! grep -q "def apply_physx_gpu_capacity" "$REPO/h1_cfg/beamdojo_common.py"; then
   echo "beamdojo_common.py is missing PhysX GPU buffer bump. Pull ${REF} or cloned beams/stones overflow contact buffers." >&2
   exit 1
@@ -92,9 +100,42 @@ if [[ -z "${WANDB_API_KEY:-}" ]]; then
 fi
 
 STAGE="${STAGE:-1}"
-echo "Starting Stage ${STAGE} ${ROBOT:-h1} on CUDA."
+ROBOT="${ROBOT:-h1}"
+TERRAIN="${TERRAIN:-beam}"
+echo "Starting Stage ${STAGE} ${ROBOT} on CUDA."
 echo "Live curves: Weights & Biases (printed by train_stage*.sh)."
 echo "Kingdom Research Lab polls tracking/training-status.json — rsync that file to the Mac or open the cloud tunnel."
+
+# Isaac-free: flip Research Lab off Idle before AppLauncher (5–15 min).
+python3 -c "
+import beamdojo_runtime
+beamdojo_runtime.write_boot_status(
+    stage=int('${STAGE}'),
+    robot='${ROBOT}',
+    terrain='${TERRAIN}',
+    note='after_relaunch: starting Isaac / Stage ${STAGE}. Not a live W&B run yet.',
+)
+print('[INFO] Wrote boot training-status (unknown) before isaaclab.sh.')
+"
+
+# Fail fast on a rejected key so Isaac does not boot for 15 min with no W&B page.
+python3 - <<'PY'
+import os
+import sys
+try:
+    import wandb
+except ImportError:
+    print("[INFO] host python has no wandb; Isaac train process will init W&B.")
+    sys.exit(0)
+key = os.environ.get("WANDB_API_KEY", "").strip()
+try:
+    wandb.login(key=key, relogin=True)
+except Exception as exc:
+    print(f"WANDB_API_KEY rejected ({type(exc).__name__}: {exc}). Fix .env.lambda.", file=sys.stderr)
+    sys.exit(1)
+print("[INFO] wandb login accepted.")
+PY
+
 if [[ "$STAGE" == "2" ]]; then
   echo "Stage 2 loads the latest Stage 1 checkpoint. Override with LOAD_RUN, CHECKPOINT, or LOAD_EXPERIMENT."
   exec "$ROOT/train_stage2.sh"
