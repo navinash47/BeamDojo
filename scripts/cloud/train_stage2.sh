@@ -12,6 +12,11 @@ CHECKPOINT="${CHECKPOINT:-model_9999.pt}"
 LOGGER_ARGS=(--logger tensorboard)
 if [[ -n "${WANDB_API_KEY:-}" ]]; then
   LOGGER_ARGS=(--logger wandb --log_project_name "${WANDB_PROJECT:-beamdojo}")
+  if [[ -n "${WANDB_ENTITY:-}" ]]; then
+    echo "W&B: https://wandb.ai/${WANDB_ENTITY}/${WANDB_PROJECT:-beamdojo}"
+  else
+    echo "W&B project ${WANDB_PROJECT:-beamdojo} — open https://wandb.ai (set WANDB_ENTITY for a direct link)."
+  fi
 fi
 exec /workspace/isaaclab/isaaclab.sh -p train_beamdojo.py \
   --headless \
