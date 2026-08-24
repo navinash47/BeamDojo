@@ -57,6 +57,17 @@ class LiveMetricsTests(unittest.TestCase):
         metrics = self.m.extract_live_metrics({"loss_dict": {"value_foothold": 0.22}})
         self.assertAlmostEqual(metrics["foothold_value_loss"], 0.22)
 
+    def test_reads_ep_infos_foothold_penalty(self):
+        metrics = self.m.extract_live_metrics(
+            {
+                "ep_infos": [
+                    {"foothold_penalty": [-0.4, -0.2]},
+                    {"Episode_Reward/track_lin_vel_xy_exp": 1.0},
+                ]
+            }
+        )
+        self.assertAlmostEqual(metrics["foothold_penalty"], -0.3)
+
     def test_skips_non_finite_and_non_scalars(self):
         metrics = self.m.extract_live_metrics(
             {

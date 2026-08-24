@@ -9,7 +9,7 @@ Paper: critic 1 = dense locomotion, critic 2 = sparse foothold,
 
 from __future__ import annotations
 
-from beamdojo_mdp.advantage import W1, W2, combine_advantages, gae_advantages
+from beamdojo_mdp.advantage import W1, W2, bootstrap_timeouts, combine_advantages, gae_advantages
 from beamdojo_mdp.foothold_extras import foothold_term_from_extras
 
 try:
@@ -108,12 +108,15 @@ class PPODoubleCritic(PPO):
 
     def process_env_step(self, obs, rewards, dones, extras):
         foot = _foothold_from_extras(extras, rewards)
+        # Split the env reward first. Timeout bootstrap is not part of R; rsl-rl
+        # adds gamma * V * timeout onto the stored reward (Stage 1 is timeout-only).
         loco = rewards - foot
         step = self.storage.step
         if self.foot_rewards is not None:
-            self.foot_rewards[step].copy_(foot.view(-1, 1))
+            stored = _timeout_bootstrap_reward(foot, self._pending_foot_value, extras, self.gamma)
+            self.foot_rewards[step].copy_(stored.reshape(-1, 1))
             if self._pending_foot_value is not None:
-                self.foot_values[step].copy_(self._pending_foot_value.view(-1, 1))
+                self.foot_values[step].copy_(self._pending_foot_value.reshape(-1, 1))
         super().process_env_step(obs, loco, dones, extras)
 
     def compute_returns(self, obs):
@@ -126,6 +129,8 @@ class PPODoubleCritic(PPO):
         super().compute_returns(obs)
         if self.foot_rewards is None:
             return
+        last_loco = last_loco.reshape(-1, 1)
+        last_foot = last_foot.reshape(-1, 1)
         a2, r2 = gae_advantages(
             self.foot_rewards,
             self.foot_values,
@@ -155,7 +160,7 @@ class PPODoubleCritic(PPO):
         obs = self.storage.observations.flatten(0, 1)
         target = self.foot_returns.flatten(0, 1)
         pred = self.policy.evaluate_foothold(obs)
-        extra = (pred - target).pow(2).mean()
+        extra = (pred.reshape_as(target) - target).pow(2).mean()
         self.foot_optimizer.zero_grad()
         extra.backward()
         nn.utils.clip_grad_norm_(self.policy.critic_foothold.parameters(), self.max_grad_norm)
@@ -177,3 +182,28 @@ def _foothold_from_extras(extras, rewards):
     if not torch.is_tensor(foot):
         foot = torch.as_tensor(foot, device=rewards.device, dtype=rewards.dtype)
     return foot.to(device=rewards.device, dtype=rewards.dtype).reshape_as(rewards)
+
+
+def _flat_n(tensor, n, *, device, dtype):
+    flat = torch.as_tensor(tensor, device=device, dtype=dtype).reshape(-1)
+    if flat.numel() == 1:
+        return flat.expand(n).clone()
+    if flat.numel() != n:
+        raise ValueError(f"timeout-bootstrap length {flat.numel()} != {n}")
+    return flat
+
+
+def _timeout_bootstrap_reward(rewards, values, extras, gamma: float):
+    """Same formula as rsl-rl 3.0.1 PPO.process_env_step timeout bootstrap."""
+    if extras is None or "time_outs" not in extras or values is None:
+        return rewards
+    n = int(rewards.numel())
+    device = rewards.device
+    dtype = rewards.dtype
+    boot = bootstrap_timeouts(
+        rewards.reshape(n),
+        _flat_n(values, n, device=device, dtype=dtype),
+        _flat_n(extras["time_outs"], n, device=device, dtype=dtype),
+        gamma,
+    )
+    return boot.reshape_as(rewards)

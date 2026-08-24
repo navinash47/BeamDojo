@@ -23,6 +23,18 @@ class DoubleCriticModuleTests(unittest.TestCase):
         self.assertIn("_update_foothold_critic", src)
         self.assertLess(src.find("_update_foothold_critic"), src.find("super().update"))
 
+    def test_process_env_step_bootstraps_timeouts_after_split(self):
+        import beamdojo_agents.double_critic as dc
+
+        src = inspect.getsource(dc.PPODoubleCritic.process_env_step)
+        split_at = src.find("loco = rewards - foot")
+        boot_at = src.find("_timeout_bootstrap_reward")
+        super_at = src.find("super().process_env_step")
+        self.assertGreater(split_at, -1)
+        self.assertGreater(boot_at, split_at)
+        self.assertGreater(super_at, boot_at)
+        self.assertIn("time_outs", inspect.getsource(dc._timeout_bootstrap_reward))
+
 
 if __name__ == "__main__":
     unittest.main()

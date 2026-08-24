@@ -6,7 +6,14 @@ import unittest
 
 import numpy as np
 
-from beamdojo_mdp.advantage import W1, W2, combine_advantages, gae_advantages, normalize_adv
+from beamdojo_mdp.advantage import (
+    W1,
+    W2,
+    bootstrap_timeouts,
+    combine_advantages,
+    gae_advantages,
+    normalize_adv,
+)
 from beamdojo_mdp.foothold_extras import foothold_term_from_extras
 
 
@@ -33,6 +40,13 @@ class AdvantageTests(unittest.TestCase):
         adv, ret = gae_advantages(rewards, values, dones, last, gamma=0.99, lam=0.95)
         self.assertEqual(adv.shape, rewards.shape)
         self.assertLess(float(np.max(np.abs(ret))), 10.0)
+
+    def test_timeout_bootstrap_same_shape(self):
+        rewards = np.array([1.0, 0.0, -2.0])
+        values = np.array([10.0, 10.0, 10.0])
+        timeouts = np.array([1.0, 0.0, 1.0])
+        out = bootstrap_timeouts(rewards, values, timeouts, gamma=0.99)
+        np.testing.assert_allclose(out, [1.0 + 9.9, 0.0, -2.0 + 9.9])
 
     def test_gae_shape_matches(self):
         t, n = 5, 3

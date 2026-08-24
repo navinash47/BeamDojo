@@ -288,8 +288,19 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn('mass_distribution_params"] = (-2.0, 2.0)', common)
         self.assertIn("static_friction_range", common)
         self.assertIn("apply_paper_dr(cfg, spec)", common)
+        self.assertIn("torso = spec.torso_body", common)
         # Training no longer zeros payload/CoM DR.
         self.assertNotIn("cfg.events.add_base_mass = None\n    cfg.events.base_com = None\n    cfg.events.push_robot = None", common.split("def apply_play")[0])
+
+    def test_g1_spec_matches_isaaclab_g1_minimal_names(self):
+        from h1_cfg.robot_spec import G1
+
+        self.assertEqual(G1.torso_body, "torso_link")
+        self.assertEqual(G1.torso_joint, "torso_joint")
+        self.assertEqual(G1.feet_body, ".*_ankle_roll_link")
+        self.assertEqual(len(G1.action_joints or []), 6)
+        self.assertIn(".*_hip_pitch_joint", G1.action_joints)
+        self.assertIn(".*_ankle_roll_joint", G1.action_joints)
 
     def test_stage2_base_contact_uses_robot_torso_body(self):
         spec = (Path(__file__).resolve().parents[1] / "h1_cfg" / "robot_spec.py").read_text()

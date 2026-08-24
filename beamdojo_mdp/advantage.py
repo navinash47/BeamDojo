@@ -19,6 +19,15 @@ def combine_advantages(adv_loco, adv_foot, w1: float = W1, w2: float = W2, eps: 
     return w1 * normalize_adv(adv_loco, eps=eps) + w2 * normalize_adv(adv_foot, eps=eps)
 
 
+def bootstrap_timeouts(rewards, values, timeouts, gamma: float = 0.99):
+    """Match rsl-rl 3.0.1 PPO.process_env_step: R += gamma * V * timeout.
+
+    Inputs must already be the same shape (e.g. both length-N). Do not pass a
+    length-N vector against an [N, 1] column — numpy/torch will broadcast wrong.
+    """
+    return rewards + gamma * values * timeouts
+
+
 def gae_advantages(rewards, values, dones, last_values, gamma: float = 0.99, lam: float = 0.95):
     """Generalized advantage estimation. Tensors/arrays shaped [T, N] or [T, N, 1]."""
     if _is_torch(rewards):

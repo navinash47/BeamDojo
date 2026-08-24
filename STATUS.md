@@ -20,7 +20,8 @@
 - Official BeamDojo training code was never released. This is an Isaac Lab recreation.
 - Dual-terrain: **flat PhysX plane** + task heightfield for 15×15 scan and 15-sample foothold (eq. 2, XY task-map). Stage 1 visual beam has collision off; Stage 2 beam/stones collide; timeout-only in Stage 1; fall/off-terrain in Stage 2.
 - Stage 2 disables `/World/ground` collision and drops onto a world catcher at z=−0.90 (below the 0.40 m height done) so the robot cannot walk beside the beam on the importer plane.
-- Double critic: `ActorCriticDouble` + `PPODoubleCritic` (w1=1.0, w2=0.25), MLP `[512, 216, 128]`, injected into rsl-rl 3.0.1.
+- Double critic: `ActorCriticDouble` + `PPODoubleCritic` (w1=1.0, w2=0.25), MLP `[512, 216, 128]`, injected into rsl-rl 3.0.1. Foothold GAE uses the same timeout bootstrap as rsl-rl (`R += γV·timeout`) so Stage 1 (timeout-only) does not treat every episode end as a true terminal for critic 2.
+- Table IX / appendix VI-C: payload ±2 kg, CoM ±5 cm, friction 0.4–1.0, obs noise, elevation yaw/tilt/dilate/repeat. Play configs still disable DR. Payload/CoM DR targets `spec.torso_body` (`torso_link` on H1 and G1).
 - Table IX / appendix VI-C: payload ±2 kg, CoM ±5 cm, friction 0.4–1.0, obs noise, elevation yaw/tilt/dilate/repeat. Play configs still disable DR.
 - G1 uses `G1_MINIMAL_CFG`, feet `.*_ankle_roll_link`, 12 lower-body actions. Do not claim paper numbers until a real G1 train finishes.
 - **Do not git-commit checkpoints or weights.**

@@ -59,6 +59,26 @@ def _loss_scalars(loss_dict: Any) -> dict[str, float]:
     return out
 
 
+def _mean_ep_info(ep_infos: Any, names: tuple[str, ...]) -> float | None:
+    """Mean of the first matching extras['log'] key across OnPolicyRunner ep_infos."""
+    if not isinstance(ep_infos, (list, tuple)):
+        return None
+    acc: list[float] = []
+    for info in ep_infos:
+        if not isinstance(info, dict):
+            continue
+        for name in names:
+            if name not in info:
+                continue
+            nested = _mean(info[name])
+            if nested is None:
+                nested = _finite(info[name])
+            if nested is not None:
+                acc.append(nested)
+                break
+    return _mean(acc)
+
+
 def extract_live_metrics(locs: dict[str, Any] | None, *, num_envs: int = 0, num_steps: int = 0) -> dict[str, float]:
     """Pull JSON-safe scalars from OnPolicyRunner.log(locals())."""
     if not isinstance(locs, dict):
@@ -71,6 +91,17 @@ def extract_live_metrics(locs: dict[str, Any] | None, *, num_envs: int = 0, num_
     if length is not None:
         metrics["mean_episode_length"] = length
     metrics.update(_loss_scalars(locs.get("loss_dict")))
+    foothold = _mean_ep_info(
+        locs.get("ep_infos"),
+        (
+            "foothold_penalty",
+            "foothold_reward",
+            "Episode_Reward/foothold_penalty",
+            "Episode_Reward/foothold_reward",
+        ),
+    )
+    if foothold is not None:
+        metrics["foothold_penalty"] = foothold
     collection = _finite(locs.get("collection_time"))
     learn = _finite(locs.get("learn_time"))
     if collection is not None:

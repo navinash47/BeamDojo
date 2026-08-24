@@ -83,7 +83,7 @@ def apply_sensors(cfg, spec: RobotSpec) -> None:
 
 def apply_paper_dr(cfg, spec: RobotSpec) -> None:
     """Appendix VI-C / Table IX. Update existing Isaac Lab terms; skip missing names."""
-    torso = ".*torso_link"
+    torso = spec.torso_body
     if getattr(cfg.events, "add_base_mass", None) is not None:
         cfg.events.add_base_mass.params["mass_distribution_params"] = (-2.0, 2.0)
         cfg.events.add_base_mass.params["asset_cfg"] = SceneEntityCfg("robot", body_names=torso)
@@ -116,7 +116,6 @@ def apply_paper_dr(cfg, spec: RobotSpec) -> None:
         term = getattr(policy, name, None)
         if term is not None:
             term.noise = Unoise(n_min=lo, n_max=hi)
-    del spec
 
 
 def apply_shared_locomotion(cfg, spec: RobotSpec, *, stage: int) -> None:
