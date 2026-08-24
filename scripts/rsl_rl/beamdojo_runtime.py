@@ -1,14 +1,34 @@
-"""Shared BeamDojo runtime helpers: GPU gate, env registration, NFS logs."""
+"""Shared BeamDojo runtime helpers: GPU gate, env registration, NFS logs, W&B status."""
 
 from __future__ import annotations
 
-import importlib
-import importlib.util
+import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+_REGISTERED = False
+
+TASK_IDS = {
+    (1, "h1", "beam"): "Isaac-BeamDojo-Stage1-H1-v0",
+    (2, "h1", "beam"): "Isaac-BeamDojo-Stage2-H1-v0",
+    (2, "h1", "stones"): "Isaac-BeamDojo-Stage2-H1-Stones-v0",
+    (1, "g1", "beam"): "Isaac-BeamDojo-Stage1-G1-v0",
+    (2, "g1", "beam"): "Isaac-BeamDojo-Stage2-G1-v0",
+}
+
+PLAY_IDS = {
+    (1, "h1", "beam"): "Isaac-BeamDojo-Stage1-H1-Play-v0",
+    (2, "h1", "beam"): "Isaac-BeamDojo-Stage2-H1-Play-v0",
+    (2, "h1", "stones"): "Isaac-BeamDojo-Stage2-H1-Stones-Play-v0",
+    (1, "g1", "beam"): "Isaac-BeamDojo-Stage1-G1-Play-v0",
+    (2, "g1", "beam"): "Isaac-BeamDojo-Stage2-G1-Play-v0",
+}
 
 
 def require_gpu_device(device: str | None) -> None:
@@ -34,23 +54,45 @@ def require_cuda() -> None:
         raise SystemExit("No CUDA devices found. Refusing to continue.")
 
 
-def ensure_beamdojo_stage1_registered() -> None:
-    """Load Stage 1 gym ids from this repo, not from a copy inside Isaac Lab."""
-    module_name = "beamdojo_stage1_cfg"
-    if module_name in sys.modules:
+def resolve_task(stage: int, robot: str, terrain: str = "beam", *, play: bool = False) -> str:
+    table = PLAY_IDS if play else TASK_IDS
+    key = (int(stage), str(robot).lower(), str(terrain).lower())
+    if key not in table:
+        raise ValueError(
+            f"No gym id for stage={stage} robot={robot} terrain={terrain} play={play}. "
+            f"Known: {sorted(table)}"
+        )
+    return table[key]
+
+
+def experiment_name(stage: int, robot: str) -> str:
+    return f"beamdojo_{robot}_stage{stage}"
+
+
+def ensure_beamdojo_registered() -> None:
+    """Import cfg modules so gym.register side effects run. Requires SimulationApp."""
+    global _REGISTERED
+    if _REGISTERED:
         return
+    import g1_cfg.beamdojo_stage1_cfg  # noqa: F401
+    import g1_cfg.beamdojo_stage2_cfg  # noqa: F401
+    import h1_cfg.beamdojo_stage1_cfg  # noqa: F401
+    import h1_cfg.beamdojo_stage2_cfg  # noqa: F401
 
-    cfg_path = REPO_ROOT / "h1_cfg" / "beamdojo_stage1_cfg.py"
-    spec = importlib.util.spec_from_file_location(module_name, cfg_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load BeamDojo Stage 1 config from {cfg_path}")
+    _REGISTERED = True
 
-    module = importlib.util.module_from_spec(spec)
-    module.agents = importlib.import_module(
-        "isaaclab_tasks.manager_based.locomotion.velocity.config.h1.agents"
-    )
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
+
+def ensure_beamdojo_stage1_registered() -> None:
+    ensure_beamdojo_registered()
+
+
+def inject_double_critic() -> None:
+    """Put ActorCriticDouble / PPODoubleCritic in rsl-rl's eval() namespace."""
+    import rsl_rl.runners.on_policy_runner as opr
+    from beamdojo_agents.double_critic import ActorCriticDouble, PPODoubleCritic
+
+    opr.ActorCriticDouble = ActorCriticDouble
+    opr.PPODoubleCritic = PPODoubleCritic
 
 
 def resolve_log_root(experiment_name: str) -> str:
@@ -66,3 +108,81 @@ def resolve_log_root(experiment_name: str) -> str:
     path = (base / "rsl_rl" / experiment_name).resolve()
     path.mkdir(parents=True, exist_ok=True)
     return str(path)
+
+
+def wandb_project_url(project: str = "beamdojo") -> str:
+    entity = (os.environ.get("WANDB_ENTITY") or os.environ.get("WANDB_USERNAME") or "").strip()
+    if entity:
+        return f"https://wandb.ai/{entity}/{project}"
+    return "https://wandb.ai"
+
+
+def apply_wandb_defaults(agent_cfg, args_cli) -> None:
+    """Use W&B when a key is present unless the user picked another logger."""
+    logger = getattr(args_cli, "logger", None)
+    if logger:
+        agent_cfg.logger = logger
+    elif os.environ.get("WANDB_API_KEY", "").strip():
+        agent_cfg.logger = "wandb"
+    project = getattr(args_cli, "log_project_name", None) or os.environ.get("WANDB_PROJECT", "beamdojo")
+    if getattr(agent_cfg, "logger", None) in {"wandb", "neptune"}:
+        agent_cfg.wandb_project = project
+        agent_cfg.neptune_project = project
+
+
+def write_training_status(payload: dict) -> Path:
+    """Write live-run JSON for Kingdom Research Lab (gitignored)."""
+    body = {
+        "updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "status": "unknown",
+        "host": "lambda-a10" if Path("/lambda/nfs/beamdojo").is_dir() else "local",
+        "wandb_project": os.environ.get("WANDB_PROJECT", "beamdojo"),
+        "wandb_entity": os.environ.get("WANDB_ENTITY") or os.environ.get("WANDB_USERNAME") or None,
+        "wandb_url": wandb_project_url(os.environ.get("WANDB_PROJECT", "beamdojo")),
+        **payload,
+    }
+    raw = json.dumps(body, indent=2) + "\n"
+    targets = [REPO_ROOT / "tracking" / "training-status.json"]
+    env_root = os.environ.get("BEAMDOJO_LOG_ROOT", "").strip()
+    if env_root:
+        targets.append(Path(env_root) / "training-status.json")
+    nfs = Path("/lambda/nfs/beamdojo/logs/training-status.json")
+    if nfs.parent.is_dir():
+        targets.append(nfs)
+    written = targets[0]
+    for path in targets:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(raw)
+        written = path
+    return written
+
+
+class FootholdExtrasWrapper:
+    """Gym wrapper: put per-step foothold term into extras for the double critic."""
+
+    def __init__(self, env):
+        self.env = env
+        self.unwrapped = getattr(env, "unwrapped", env)
+
+    def __getattr__(self, name):
+        return getattr(self.env, name)
+
+    def step(self, action):
+        result = self.env.step(action)
+        raw = self.unwrapped
+        foot = getattr(raw, "beamdojo_foothold_step", None)
+        if foot is None:
+            return result
+        dt = float(getattr(raw, "step_dt", 0.02) or 0.02)
+        contrib = foot * dt
+        # gymnasium 5-tuple or rsl-rl 4-tuple
+        info = result[-1]
+        if isinstance(info, dict):
+            info["foothold_reward"] = contrib
+        return result
+
+    def reset(self, *args, **kwargs):
+        return self.env.reset(*args, **kwargs)
+
+    def close(self):
+        return self.env.close()

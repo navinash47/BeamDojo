@@ -1,16 +1,24 @@
 # STATUS
 
-- **Version:** Stage 1 smoke
+- **Version:** Dual-terrain Stage 1/2 + G1 configs (not yet a 10k-iter train)
 - **Agent:** Agent Dojo
-- **Progress:** 18%
+- **Progress:** 45%
 - **Priority:** P1
 
 ## Next 3 tasks
-1. Dual-terrain Stage 1 (flat physics + imagined beam height scan) then 1024-env CUDA train on the A10.
-2. Log Lambda hours in `tracking/expenses.jsonl` whenever the GPU is running; terminate the instance when idle.
-3. Stage 2 hard beam + Unitree G1 port — only after Stage 1 walks the imagined beam.
+1. On the Lambda A10, start Stage 1: `bash scripts/cloud/train_stage1.sh` (1024 envs, 10k iters, `--logger wandb`).
+2. Watch curves at Weights & Biases project `beamdojo` (or TensorBoard over SSH). Copy NFS checkpoints off-box — never git-commit `.pt`.
+3. After Stage 1 walks the imagined beam: Stage 2 (`train_stage2.sh`) then G1 (`--robot g1`).
+
+## Live training (browser)
+- **Weights & Biases** is the webpage for live metrics. Train with `WANDB_API_KEY` in gitignored `.env.lambda`. Project: `beamdojo`. URL: `https://wandb.ai/<entity>/beamdojo` (set `WANDB_ENTITY` to make the link exact).
+- Lambda does **not** expose Isaac Sim as a public site. RTX proof remains `play_beamdojo.py --video`.
+- TensorBoard: `ssh -L 6006:localhost:6006 lambda-beamdojo` then `tensorboard --logdir /lambda/nfs/beamdojo/logs`.
+- Kingdom Research Lab reads `tracking/training-status.json` (gitignored; writer in `beamdojo_runtime.write_training_status`). Example: `tracking/training-status.example.json`.
 
 ## Notes
-- Official BeamDojo training code was never released. This repo is an Isaac Lab recreation (H1 Stage 1 first).
-- **Do not git-commit checkpoints or weights.** Tell Avinash so he can copy them off-box as insurance.
-- Kingdom Research Lab syncs this file, expenses, architecture, and proof videos.
+- Official BeamDojo training code was never released. This is an Isaac Lab recreation.
+- Dual-terrain: **flat PhysX plane** + task heightfield for 15×15 scan and 15-sample foothold (eq. 2). Stage 1 visual beam has collision off; Stage 2 beam/stones collide; timeout-only in Stage 1; fall/off-terrain in Stage 2.
+- Double critic: `ActorCriticDouble` + `PPODoubleCritic` (w1=1.0, w2=0.25), MLP `[512, 216, 128]`, injected into rsl-rl 3.0.1.
+- G1 uses `G1_MINIMAL_CFG`, feet `.*_ankle_roll_link`, 12 lower-body actions. Do not claim paper numbers until a real G1 train finishes.
+- **Do not git-commit checkpoints or weights.**

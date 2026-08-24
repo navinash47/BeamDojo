@@ -1,0 +1,17 @@
+{
+  "updated": "2026-08-24T19:00:00Z",
+  "status": "idle",
+  "host": "lambda-a10",
+  "robot": "h1",
+  "stage": 1,
+  "num_envs": 1024,
+  "max_iterations": 10000,
+  "iteration": null,
+  "logger": "wandb",
+  "wandb_project": "beamdojo",
+  "wandb_entity": null,
+  "wandb_url": "https://wandb.ai",
+  "log_dir": null,
+  "checkpoint": null,
+  "note": "No long train is running until you start train_beamdojo.py on the A10 with WANDB_API_KEY."
+}

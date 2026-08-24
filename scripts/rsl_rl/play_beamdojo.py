@@ -16,20 +16,10 @@ from isaaclab.app import AppLauncher
 import beamdojo_runtime  # isort: skip
 import cli_args  # isort: skip
 
-# -- Constants -------------------------------------------------------------------------------------------------------
-STAGE1_TASK_ID = "Isaac-BeamDojo-Stage1-H1-v0"
-STAGE1_PLAY_TASK_ID = "Isaac-BeamDojo-Stage1-H1-Play-v0"
-
-
-# -- CLI -------------------------------------------------------------------------------------------------------------
-parser = argparse.ArgumentParser(description="Play BeamDojo Stage 1 with RSL-RL.")
-parser.add_argument(
-    "--stage",
-    type=int,
-    choices=[1],
-    default=1,
-    help="Training stage to execute (only Stage 1 is currently supported).",
-)
+parser = argparse.ArgumentParser(description="Play BeamDojo with RSL-RL.")
+parser.add_argument("--stage", type=int, choices=[1, 2], default=1, help="Stage 1 (imagined) or 2 (hard).")
+parser.add_argument("--robot", type=str, choices=["h1", "g1"], default="h1")
+parser.add_argument("--terrain", type=str, choices=["beam", "stones"], default="beam")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during play.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument(
@@ -39,8 +29,8 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument(
     "--task",
     type=str,
-    default=STAGE1_PLAY_TASK_ID,
-    help=f"Gym registry ID for the task to play (defaults to {STAGE1_PLAY_TASK_ID}).",
+    default=None,
+    help="Gym registry ID. Default is derived from --stage/--robot/--terrain.",
 )
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
@@ -61,8 +51,10 @@ args_cli, hydra_args = parser.parse_known_args()
 
 beamdojo_runtime.require_gpu_device(getattr(args_cli, "device", None))
 
-if args_cli.stage != 1:
-    raise ValueError("play_beamdojo.py currently only supports Stage 1 training.")
+if args_cli.task is None:
+    args_cli.task = beamdojo_runtime.resolve_task(
+        args_cli.stage, args_cli.robot, args_cli.terrain, play=True
+    )
 
 # always enable cameras to record video
 if args_cli.video:
@@ -79,7 +71,8 @@ simulation_app = app_launcher.app
 import isaaclab  # noqa: F401
 
 # ensure BeamDojo Stage 1 environment is registered (requires SimulationApp to be live)
-beamdojo_runtime.ensure_beamdojo_stage1_registered()
+beamdojo_runtime.ensure_beamdojo_registered()
+beamdojo_runtime.inject_double_critic()
 
 """Rest everything follows."""
 
@@ -128,8 +121,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
-    if not getattr(agent_cfg, "experiment_name", None) or agent_cfg.experiment_name == "h1_rough":
-        agent_cfg.experiment_name = "beamdojo_stage1"
+    if getattr(args_cli, "experiment_name", None):
+        agent_cfg.experiment_name = args_cli.experiment_name
+    else:
+        agent_cfg.experiment_name = beamdojo_runtime.experiment_name(args_cli.stage, args_cli.robot)
 
     # specify directory for logging experiments (Lambda NFS when mounted)
     log_root_path = beamdojo_runtime.resolve_log_root(agent_cfg.experiment_name)
