@@ -67,6 +67,14 @@ if ! grep -q "def anymal_parent_body_names" "$REPO/scripts/rsl_rl/beamdojo_runti
   echo "beamdojo_runtime.py is missing ANYmal body-name reassert. Pull ${REF} or leftover body=base / .*THIGH crashes gym.make." >&2
   exit 1
 fi
+if ! grep -q "leftover curriculum.terrain_levels" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover terrain_levels clear. Pull ${REF} or parent terrain_levels_vel crashes the first reset before W&B." >&2
+  exit 1
+fi
+if ! grep -q "def _ensure_obs_groups" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing obs_groups sanitize. Pull ${REF} or leftover MISSING obs_groups dies in OnPolicyRunner before wandb.init." >&2
+  exit 1
+fi
 if ! grep -q "def apply_physx_gpu_capacity" "$REPO/h1_cfg/beamdojo_common.py"; then
   echo "beamdojo_common.py is missing PhysX GPU buffer bump. Pull ${REF} or cloned beams/stones overflow contact buffers." >&2
   exit 1

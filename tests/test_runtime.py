@@ -671,6 +671,31 @@ class RunnerCfgSanitizeTests(unittest.TestCase):
         self.rt.sanitize_rsl_rl_train_cfg(cfg)
         self.assertIsNone(cfg["algorithm"]["rnd_cfg"])
         self.assertIsNone(cfg["algorithm"]["symmetry_cfg"])
+        self.assertEqual(cfg["algorithm"]["class_name"], "PPODoubleCritic")
+        self.assertEqual(cfg["obs_groups"], {"policy": ["policy"], "critic": ["policy"]})
+
+    def test_distillation_class_name_is_left_intact(self):
+        cfg = {"algorithm": {"class_name": "Distillation"}, "policy": {"class_name": "StudentTeacher"}}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["algorithm"]["class_name"], "Distillation")
+        self.assertEqual(cfg["policy"]["class_name"], "StudentTeacher")
+
+    def test_empty_critic_obs_groups_are_filled_from_policy(self):
+        cfg = {"obs_groups": {"policy": ["policy"], "critic": []}}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["obs_groups"]["critic"], ["policy"])
+
+    def test_leftover_actor_critic_class_is_restored(self):
+        cfg = {"policy": {"class_name": "ActorCritic"}, "algorithm": {"class_name": "PPO"}}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["policy"]["class_name"], "ActorCriticDouble")
+        self.assertEqual(cfg["algorithm"]["class_name"], "PPODoubleCritic")
+
+    def test_valid_obs_groups(self):
+        self.assertTrue(self.rt.valid_obs_groups({"policy": ["policy"], "critic": ["policy"]}))
+        self.assertFalse(self.rt.valid_obs_groups(None))
+        self.assertFalse(self.rt.valid_obs_groups({}))
+        self.assertFalse(self.rt.valid_obs_groups({"policy": []}))
 
     def test_default_isaaclab_rnd_dump_is_sanitized_to_none(self):
         cfg = {
@@ -701,6 +726,8 @@ class RunnerCfgSanitizeTests(unittest.TestCase):
         out = self.rt.runner_cfg_dict(Agent())
         self.assertIsNone(out["algorithm"]["rnd_cfg"])
         self.assertIsNone(out["algorithm"]["symmetry_cfg"])
+        self.assertEqual(out["algorithm"]["class_name"], "PPODoubleCritic")
+        self.assertEqual(out["obs_groups"], {"policy": ["policy"], "critic": ["policy"]})
 
 
 class ReassertGpuEnvCfgTests(unittest.TestCase):
@@ -852,6 +879,54 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertTrue(cfg.observations.policy.flatten_history_dim)
         self.assertEqual(cfg.sim.physics_material, "walk")
 
+    def test_reassert_clears_leftover_terrain_levels(self):
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "task_stone_0": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "curriculum": type("Cur", (), {"terrain_levels": object(), "beam_width": "keep"})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNone(cfg.curriculum.terrain_levels)
+        self.assertEqual(cfg.curriculum.beam_width, "keep")
+
+    def test_reassert_restores_g1_twelve_dof_and_stage2_spawn(self):
+        from h1_cfg.robot_spec import G1
+
+        joint_pos = type("J", (), {"joint_names": [".*"]})()
+        reset_params = {"pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)}}
+        physx = type("P", (), {"gpu_max_rigid_patch_count": 10 * 2**15, "gpu_max_rigid_contact_count": 2**24})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": object(), "task_stone_0": None},
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": type("Sim", (), {"physx": physx})(),
+                "rewards": type("Rew", (), {"joint_deviation_fingers": object()})(),
+                "actions": type("Act", (), {"joint_pos": joint_pos})(),
+                "events": type("Ev", (), {"reset_base": type("T", (), {"params": reset_params})()})(),
+                "curriculum": type("Cur", (), {"terrain_levels": object()})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(joint_pos.joint_names, list(G1.action_joints))
+        self.assertEqual(reset_params["pose_range"]["y"], (-0.08, 0.08))
+        self.assertEqual(reset_params["pose_range"]["x"], (-0.2, 0.5))
+        self.assertEqual(physx.gpu_max_rigid_patch_count, 16 * 2**15)
+        self.assertEqual(physx.gpu_max_rigid_contact_count, 2**23)
+        self.assertIsNone(cfg.curriculum.terrain_levels)
+
     def test_reassert_replaces_parent_height_scan_without_isaac(self):
         called = []
 
@@ -884,6 +959,29 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
             self.rt.reassert_gpu_env_cfg(cfg)
         self.assertEqual(called, [cfg.observations.policy])
         self.assertEqual(cfg.observations.policy.height_scan, "task")
+
+    def test_leftover_all_joints(self):
+        self.assertTrue(self.rt.leftover_all_joints(".*"))
+        self.assertTrue(self.rt.leftover_all_joints([".*"]))
+        self.assertFalse(self.rt.leftover_all_joints([".*_hip_yaw_joint"]))
+        self.assertFalse(self.rt.leftover_all_joints(None))
+
+    def test_h1_full_body_actions_are_not_rewritten(self):
+        joint_pos = type("J", (), {"joint_names": [".*"]})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "rewards": type("Rew", (), {"joint_deviation_fingers": None})(),
+                "actions": type("Act", (), {"joint_pos": joint_pos})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(joint_pos.joint_names, [".*"])
 
     def test_anymal_parent_body_names(self):
         self.assertTrue(self.rt.anymal_parent_body_names("base"))
@@ -1002,6 +1100,10 @@ class GymIdSourceTests(unittest.TestCase):
         runtime = (root / "scripts" / "rsl_rl" / "beamdojo_runtime.py").read_text()
         self.assertIn("def _patch_hydra_none_from_dict", runtime)
         self.assertIn("_patch_hydra_none_from_dict()", runtime)
+        self.assertIn("leftover curriculum.terrain_levels", runtime)
+        self.assertIn("def _ensure_obs_groups", runtime)
+        self.assertIn("PPODoubleCritic", runtime)
+        self.assertIn("ActorCriticDouble", runtime)
         env_sh = (root / "scripts" / "cloud" / "_env.sh").read_text()
         self.assertIn("WANDB_USERNAME", env_sh)
         self.assertIn("WANDB_ENTITY", env_sh)
@@ -1034,6 +1136,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("write_boot_status", relaunch)
         self.assertIn("clear_stale_distributed_env", relaunch)
         self.assertIn("anymal_parent_body_names", relaunch)
+        self.assertIn("leftover curriculum.terrain_levels", relaunch)
+        self.assertIn("_ensure_obs_groups", relaunch)
         self.assertIn("write_boot_status", stage1)
         self.assertIn("write_boot_status", stage2)
         self.assertIn('checkout -f -B "$REF" "origin/${REF}"', relaunch)

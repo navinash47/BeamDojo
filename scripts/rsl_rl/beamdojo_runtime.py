@@ -211,6 +211,65 @@ def inactive_rsl_optional_cfg(name: str, value) -> bool:
     return False
 
 
+DEFAULT_OBS_GROUPS = {"policy": ["policy"], "critic": ["policy"]}
+
+
+def valid_obs_groups(value) -> bool:
+    """True when rsl-rl 3.0.1 ``resolve_obs_groups`` can read this mapping."""
+    if not isinstance(value, dict) or not value:
+        return False
+    policy = value.get("policy")
+    if not isinstance(policy, (list, tuple)) or not policy:
+        return False
+    return all(isinstance(name, str) and name for name in policy)
+
+
+def leftover_all_joints(names) -> bool:
+    """True for parent locomotion ``joint_names=[".*"]`` (full-body leftover)."""
+    if names is None:
+        return False
+    items = list(names) if isinstance(names, (list, tuple)) else [names]
+    return len(items) == 1 and str(items[0]) == ".*"
+
+
+def _ensure_obs_groups(train_cfg: dict) -> None:
+    """Isaac Lab 2.3.2 ``obs_groups`` defaults to ``MISSING``.
+
+    ``OnPolicyRunner.__init__`` calls ``resolve_obs_groups`` *before*
+    ``learn()`` / ``wandb.init``. A leftover None / empty / ``MISSING`` dump
+    KeyErrors or ValueErrors and the live W&B page never opens.
+    """
+    groups = train_cfg.get("obs_groups")
+    if not valid_obs_groups(groups):
+        print("[WARN] Restoring leftover obs_groups for rsl-rl 3.0.1 (policy+critic → policy).")
+        train_cfg["obs_groups"] = dict(DEFAULT_OBS_GROUPS)
+        return
+    critic = groups.get("critic")
+    if not isinstance(critic, (list, tuple)) or not critic:
+        print("[WARN] Filling leftover empty obs_groups['critic'] from policy.")
+        groups["critic"] = list(groups["policy"])
+
+
+def _reassert_double_critic_class_names(train_cfg: dict) -> None:
+    """Hydra leftover restores parent ``ActorCritic`` / ``PPO``.
+
+    That still boots and logs, but it is not BeamDojo double-critic. Distillation
+    keeps its own class names.
+    """
+    algorithm = train_cfg.get("algorithm")
+    if not isinstance(algorithm, dict):
+        return
+    if algorithm.get("class_name") == "Distillation":
+        return
+    if algorithm.get("class_name") in (None, "", "PPO"):
+        print("[WARN] Restoring leftover algorithm.class_name to PPODoubleCritic.")
+        algorithm["class_name"] = "PPODoubleCritic"
+    policy = train_cfg.get("policy")
+    if isinstance(policy, dict) and policy.get("class_name") in (None, "", "ActorCritic"):
+        print("[WARN] Restoring leftover policy.class_name to ActorCriticDouble.")
+        policy["class_name"] = "ActorCriticDouble"
+
+
 def sanitize_rsl_rl_train_cfg(train_cfg: dict) -> dict:
     """Drop empty Hydra RND/symmetry dicts before OnPolicyRunner / PPO 3.0.1.
 
@@ -226,6 +285,8 @@ def sanitize_rsl_rl_train_cfg(train_cfg: dict) -> dict:
         for key in ("rnd_cfg", "symmetry_cfg"):
             if inactive_rsl_optional_cfg(key, algorithm.get(key)):
                 algorithm[key] = None
+    _ensure_obs_groups(train_cfg)
+    _reassert_double_critic_class_names(train_cfg)
     return train_cfg
 
 
@@ -309,6 +370,112 @@ def _set_entity_body_names(entity, names) -> None:
         entity["body_names"] = names
     elif hasattr(entity, "body_names"):
         entity.body_names = names
+
+
+def _scene_uses_stones(scene) -> bool:
+    return scene is not None and getattr(scene, "task_stone_0", None) is not None
+
+
+def _reassert_physx_floors(env_cfg) -> None:
+    """Parent locomotion leftover is ``10 * 2**15`` patches — too small for cloned beams."""
+    try:
+        from h1_cfg.physx_gpu import PHYSX_A10_UNSAFE_FLOOR, apply_physx_gpu_capacity
+    except ImportError as exc:
+        print(f"[WARN] PhysX floor reassert skipped ({type(exc).__name__}: {exc})")
+        return
+    scene = getattr(env_cfg, "scene", None)
+    try:
+        apply_physx_gpu_capacity(env_cfg, stones=_scene_uses_stones(scene))
+    except Exception as exc:
+        print(f"[WARN] PhysX floor reassert skipped ({type(exc).__name__}: {exc})")
+    physx = getattr(getattr(env_cfg, "sim", None), "physx", None)
+    if physx is None:
+        return
+    # Attribute name, not a quoted key in physx_gpu.py (after_relaunch refuses that).
+    current = getattr(physx, "gpu_max_rigid_contact_count", None)
+    try:
+        value = int(current)
+    except (TypeError, ValueError):
+        return
+    if value > PHYSX_A10_UNSAFE_FLOOR:
+        print(
+            "[WARN] Clamping leftover PhysX contact stream to the Isaac 8M default. "
+            "A 16M leftover OOMs A10 24GB before wandb.init."
+        )
+        setattr(physx, "gpu_max_rigid_contact_count", PHYSX_A10_UNSAFE_FLOOR)
+
+
+def _reassert_g1_action_joints(env_cfg) -> None:
+    """Parent leftover ``joint_names=[".*"]`` puts G1 arms/fingers back in the action."""
+    rewards = getattr(env_cfg, "rewards", None)
+    if rewards is None or getattr(rewards, "joint_deviation_fingers", None) is None:
+        return
+    actions = getattr(env_cfg, "actions", None)
+    joint_pos = getattr(actions, "joint_pos", None)
+    if joint_pos is None or not leftover_all_joints(getattr(joint_pos, "joint_names", None)):
+        return
+    try:
+        from h1_cfg.robot_spec import G1
+    except ImportError as exc:
+        print(f"[WARN] G1 action-joint reassert skipped ({type(exc).__name__}: {exc})")
+        return
+    print("[WARN] Restoring leftover G1 action joints off parent '.*' (paper: 12 lower-body).")
+    joint_pos.joint_names = list(G1.action_joints)
+
+
+def _pose_range_from_reset(reset_base):
+    params = getattr(reset_base, "params", None)
+    if params is None:
+        return None, None
+    if isinstance(params, dict):
+        pose = params.get("pose_range")
+        current = dict(pose) if isinstance(pose, dict) else {}
+        return params, current
+    pose = getattr(params, "pose_range", None)
+    current = dict(pose) if isinstance(pose, dict) else {}
+    return params, current
+
+
+def _set_pose_range(params, pose_range) -> None:
+    if isinstance(params, dict):
+        params["pose_range"] = pose_range
+    elif hasattr(params, "pose_range"):
+        params.pose_range = pose_range
+
+
+def _range_too_wide(span, limit: float) -> bool:
+    if span is None:
+        return False
+    try:
+        lo, hi = float(span[0]), float(span[1])
+    except (TypeError, ValueError, IndexError):
+        return False
+    return abs(lo) > limit or abs(hi) > limit
+
+
+def _reassert_stage2_reset_on_beam(env_cfg) -> None:
+    """Parent leftover ``y=(-0.5, 0.5)`` / ``yaw=±π`` spawns beside a 20 cm beam."""
+    scene = getattr(env_cfg, "scene", None)
+    if scene is None or getattr(scene, "catcher", None) is None:
+        return
+    events = getattr(env_cfg, "events", None)
+    reset_base = getattr(events, "reset_base", None)
+    if reset_base is None:
+        return
+    params, pose = _pose_range_from_reset(reset_base)
+    if params is None:
+        return
+    if not (
+        _range_too_wide(pose.get("y"), 0.1)
+        or _range_too_wide(pose.get("yaw"), 0.5)
+        or _range_too_wide(pose.get("x"), 0.6)
+    ):
+        return
+    print("[WARN] Tightening leftover reset_base pose so Stage 2 does not spawn off the beam.")
+    pose["x"] = (-0.2, 0.5)
+    pose["y"] = (-0.08, 0.08)
+    pose["yaw"] = (-0.3, 0.3)
+    _set_pose_range(params, pose)
 
 
 def _reassert_anymal_body_names(env_cfg) -> None:
@@ -429,7 +596,17 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     if sim is not None and mat is not None:
         sim.physics_material = mat
 
+    curriculum = getattr(env_cfg, "curriculum", None)
+    if curriculum is not None and getattr(curriculum, "terrain_levels", None) is not None:
+        # Parent leftover. terrain_levels_vel does terrain_generator.size on reset
+        # (RslRlVecEnvWrapper.__init__ → env.reset) — before wandb.init. Plane has none.
+        print("[WARN] Clearing leftover curriculum.terrain_levels (plane has no generator).")
+        curriculum.terrain_levels = None
+
     _reassert_anymal_body_names(env_cfg)
+    _reassert_g1_action_joints(env_cfg)
+    _reassert_stage2_reset_on_beam(env_cfg)
+    _reassert_physx_floors(env_cfg)
 
 
 def _none_safe_update_class_from_dict(orig):
