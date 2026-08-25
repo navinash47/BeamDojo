@@ -247,6 +247,14 @@ if ! grep -q "def leftover_invalid_obs_scale" "$REPO/scripts/rsl_rl/beamdojo_run
   echo "beamdojo_runtime.py is missing leftover obs-scale restore. Pull ${REF} or scale=None TypeErrors at first reset." >&2
   exit 1
 fi
+if ! grep -q "def leftover_invalid_obs_clip" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover obs-clip drop. Pull ${REF} or clip=(None, None) TypeErrors at first reset." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_disabled_fabric" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover use_fabric restore. Pull ${REF} or Fabric-off hides Stage 2 USD writes." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1

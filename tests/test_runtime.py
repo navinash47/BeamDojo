@@ -1819,6 +1819,11 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertTrue(self.rt.leftover_invalid_obs_scale(None))
         self.assertTrue(self.rt.leftover_invalid_obs_scale(0.0))
         self.assertFalse(self.rt.leftover_invalid_obs_scale(2.0))
+        self.assertTrue(self.rt.leftover_invalid_obs_clip((None, None)))
+        self.assertFalse(self.rt.leftover_invalid_obs_clip((-1.0, 1.0)))
+        self.assertFalse(self.rt.leftover_invalid_obs_clip(None))
+        self.assertTrue(self.rt.leftover_disabled_fabric(type("Sim", (), {"use_fabric": False})()))
+        self.assertFalse(self.rt.leftover_disabled_fabric(type("Sim", (), {"use_fabric": True})()))
         h1_act = type(
             "BeamDojoStage1EnvCfg",
             (),
@@ -2513,6 +2518,32 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertEqual(ang.scale, 0.25)
         self.assertEqual(grav.scale, 1.0)
 
+        broken_clip = type("T", (), {"func": object(), "clip": (None, None), "scale": 1.0})()
+        fabric = type("Sim", (), {"use_fabric": False, "dt": 0.005, "device": "cuda:0", "render_interval": 4})()
+        clip_cfg = type(
+            "BeamDojoStage2EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})(),
+                    },
+                )(),
+                "observations": type("O", (), {"policy": type("P", (), {"height_scan": broken_clip})()})(),
+                "commands": None,
+                "sim": fabric,
+                "decimation": 4,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(clip_cfg)
+        self.assertIsNone(broken_clip.clip)
+        self.assertTrue(fabric.use_fabric)
+
     def test_leftover_quad_and_full_usd_helpers(self):
         anymal = type(
             "Cfg",
@@ -2701,6 +2732,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_missing_terminations", runtime)
         self.assertIn("def leftover_missing_time_out", runtime)
         self.assertIn("def leftover_invalid_obs_scale", runtime)
+        self.assertIn("def leftover_invalid_obs_clip", runtime)
+        self.assertIn("def leftover_disabled_fabric", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -2790,6 +2823,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_missing_events", relaunch)
         self.assertIn("leftover_missing_terminations", relaunch)
         self.assertIn("leftover_invalid_obs_scale", relaunch)
+        self.assertIn("leftover_invalid_obs_clip", relaunch)
+        self.assertIn("leftover_disabled_fabric", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)

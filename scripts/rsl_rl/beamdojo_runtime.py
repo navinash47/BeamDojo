@@ -847,6 +847,22 @@ def leftover_invalid_obs_scale(value) -> bool:
     return number != number or number <= 0.0
 
 
+def leftover_invalid_obs_clip(value) -> bool:
+    """Leftover ``clip=(None, None)`` / bool TypeErrors ``obs.clip`` at first reset."""
+    if value is None or value is False:
+        return False
+    return not _range_pair_ok(value)
+
+
+def leftover_disabled_fabric(sim) -> bool:
+    """Leftover ``use_fabric=False`` hides Stage 2 USD prim writes at first reset."""
+    if sim is None:
+        return False
+    if isinstance(sim, dict):
+        return sim.get("use_fabric") is False
+    return getattr(sim, "use_fabric", None) is False
+
+
 def leftover_invalid_env_spacing(scene) -> bool:
     """``None`` / parent ``2.5`` overlaps 1024 H1s at gym.make. Play ``6.0`` stays."""
     if scene is None or not hasattr(scene, "env_spacing"):
@@ -2187,6 +2203,11 @@ def _reassert_obs_history(env_cfg) -> None:
                 )
                 _manager_set(term, "scale", restored)
             if term is not None and (
+                isinstance(term, dict) or hasattr(term, "clip")
+            ) and leftover_invalid_obs_clip(_manager_get(term, "clip")):
+                print(f"[WARN] Clearing leftover observations.{group_name}.{term_name}.clip.")
+                _manager_set(term, "clip", None)
+            if term is not None and (
                 isinstance(term, dict) or hasattr(term, "history_length")
             ) and leftover_excess_obs_history(_manager_get(term, "history_length")):
                 print(
@@ -2326,6 +2347,7 @@ def _reassert_sim_timing(env_cfg) -> None:
 
             env_cfg.sim = SimulationCfg(dt=0.005, device="cuda:0", render_interval=dec_n or 4)
             env_cfg.sim.wait_for_textures = False
+            env_cfg.sim.use_fabric = True
         except ImportError:
             env_cfg.sim = type(
                 "SimulationCfg",
@@ -2335,6 +2357,7 @@ def _reassert_sim_timing(env_cfg) -> None:
                     "device": "cuda:0",
                     "render_interval": dec_n or 4,
                     "wait_for_textures": False,
+                    "use_fabric": True,
                 },
             )()
     sim = getattr(env_cfg, "sim", None)
@@ -2365,6 +2388,12 @@ def _reassert_sim_timing(env_cfg) -> None:
             sim["wait_for_textures"] = False
         else:
             sim.wait_for_textures = False
+    if leftover_disabled_fabric(sim):
+        print("[WARN] Enabling leftover sim.use_fabric (Stage 2 USD prim writes at first reset).")
+        if isinstance(sim, dict):
+            sim["use_fabric"] = True
+        else:
+            sim.use_fabric = True
 
 
 def _world_catcher_stub():
