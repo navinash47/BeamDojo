@@ -765,6 +765,24 @@ class RunnerCfgSanitizeTests(unittest.TestCase):
         self.rt.sanitize_rsl_rl_train_cfg(cfg)
         self.assertIsNone(cfg["algorithm"]["symmetry_cfg"])
 
+    def test_unknown_policy_class_and_noise_std_are_restored(self):
+        cfg = {
+            "policy": {"class_name": "PPORecurrent", "noise_std_type": "state_dependent"},
+            "algorithm": {"class_name": "PPORecurrent"},
+        }
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["policy"]["class_name"], "ActorCriticDouble")
+        self.assertEqual(cfg["algorithm"]["class_name"], "PPODoubleCritic")
+        self.assertEqual(cfg["policy"]["noise_std_type"], "scalar")
+
+    def test_reassert_runner_class_restores_on_policy(self):
+        agent = type("A", (), {"class_name": None})()
+        self.rt.reassert_runner_class(agent)
+        self.assertEqual(agent.class_name, "OnPolicyRunner")
+        distill = type("A", (), {"class_name": "DistillationRunner"})()
+        self.rt.reassert_runner_class(distill)
+        self.assertEqual(distill.class_name, "DistillationRunner")
+
     def test_valid_obs_groups(self):
         self.assertTrue(self.rt.valid_obs_groups({"policy": ["policy"], "critic": ["policy"]}))
         self.assertFalse(self.rt.valid_obs_groups(None))
@@ -1230,6 +1248,95 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertTrue(self.rt.leftover_h1_bodies_for_g1(".*ankle_link"))
         self.assertFalse(self.rt.leftover_h1_joints_for_g1(".*_hip_yaw_joint"))
 
+    def test_leftover_anymal_usd_is_restored_to_g1_minimal(self):
+        robot = type(
+            "R",
+            (),
+            {
+                "usd_path": "/Isaac/Robots/ANYbotics/ANYmal-D/anymal_d.usd",
+                "init_state": type("S", (), {"pos": (0.0, 0.0, 0.6)})(),
+            },
+        )()
+        cfg = type(
+            "BeamDojoStage1G1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": robot,
+                        "env_spacing": 2.5,
+                        "contact_forces": type("C", (), {"history_length": 0, "track_air_time": False})(),
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "rewards": type("Rew", (), {"joint_deviation_fingers": object()})(),
+                "terminations": type("Term", (), {"base_contact": object(), "base_height": object()})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIn("g1_minimal", robot.usd_path.lower())
+        self.assertEqual(robot.init_state.pos[2], 0.74)
+        self.assertEqual(cfg.scene.env_spacing, 8.0)
+        self.assertEqual(cfg.scene.contact_forces.history_length, 3)
+        self.assertTrue(cfg.scene.contact_forces.track_air_time)
+        self.assertIsNone(cfg.terminations.base_contact)
+        self.assertIsNone(cfg.terminations.base_height)
+
+    def test_leftover_full_h1_usd_and_pelvis_are_restored(self):
+        robot = type(
+            "R",
+            (),
+            {
+                "usd_path": "/Isaac/Robots/Unitree/H1/h1.usd",
+                "init_state": type("S", (), {"pos": (0.0, 0.0, 0.6)})(),
+            },
+        )()
+        cfg = type(
+            "BeamDojoStage1H1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": None, "robot": robot},
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIn("h1_minimal", robot.usd_path.lower())
+        self.assertEqual(robot.init_state.pos[2], 1.05)
+
+    def test_leftover_quad_and_full_usd_helpers(self):
+        anymal = type(
+            "Cfg",
+            (),
+            {"scene": type("S", (), {"robot": type("R", (), {"usd_path": "/Isaac/ANYmal/anymal.usd"})()})()},
+        )()
+        full = type(
+            "Cfg",
+            (),
+            {"scene": type("S", (), {"robot": type("R", (), {"usd_path": "/Isaac/Unitree/H1/h1.usd"})()})()},
+        )()
+        minimal = type(
+            "Cfg",
+            (),
+            {"scene": type("S", (), {"robot": type("R", (), {"usd_path": "/Isaac/Unitree/H1/h1_minimal.usd"})()})()},
+        )()
+        self.assertTrue(self.rt.leftover_quadruped_robot(anymal))
+        self.assertTrue(self.rt.leftover_full_unitree_usd(full))
+        self.assertFalse(self.rt.leftover_full_unitree_usd(minimal))
+        self.assertFalse(self.rt.leftover_quadruped_robot(minimal))
+
     def test_anymal_parent_body_names(self):
         self.assertTrue(self.rt.anymal_parent_body_names("base"))
         self.assertTrue(self.rt.anymal_parent_body_names(".*THIGH"))
@@ -1353,6 +1460,9 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def _drop_on_policy_runner_kwarg_collisions", runtime)
         self.assertIn("def _reassert_g1_joint_fullmatch", runtime)
         self.assertIn("def _drop_h1_leftover_fingers", runtime)
+        self.assertIn("def _reassert_unitree_robot", runtime)
+        self.assertIn("def _reassert_contact_history", runtime)
+        self.assertIn("def reassert_runner_class", runtime)
         self.assertIn("ActorCriticRecurrent", runtime)
         self.assertIn("is_finite_horizon", runtime)
         self.assertIn("PPODoubleCritic", runtime)
@@ -1369,6 +1479,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertLess(play.index("reassert_gpu_env_cfg(env_cfg)"), play.index("gym.make("))
         self.assertIn("clear_stale_distributed_env", play)
         self.assertIn("beamdojo_runtime.runner_cfg_dict(agent_cfg)", train)
+        self.assertIn("reassert_runner_class(agent_cfg)", train)
+        self.assertIn("reassert_runner_class(agent_cfg)", play)
         self.assertNotIn("OnPolicyRunner(env, agent_cfg.to_dict()", train)
         self.assertNotIn("OnPolicyRunner(env, agent_cfg.to_dict()", play)
         stage1 = (root / "scripts" / "cloud" / "train_stage1.sh").read_text()
@@ -1395,6 +1507,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("_drop_on_policy_runner_kwarg_collisions", relaunch)
         self.assertIn("_reassert_g1_joint_fullmatch", relaunch)
         self.assertIn("_drop_h1_leftover_fingers", relaunch)
+        self.assertIn("_reassert_unitree_robot", relaunch)
+        self.assertIn("_reassert_contact_history", relaunch)
         self.assertIn("write_boot_status", stage1)
         self.assertIn("write_boot_status", stage2)
         self.assertIn('checkout -f -B "$REF" "origin/${REF}"', relaunch)

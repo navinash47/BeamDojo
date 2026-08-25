@@ -287,6 +287,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseR
         env = beamdojo_runtime.FootholdExtrasWrapper(env)
         env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
+        beamdojo_runtime.reassert_runner_class(agent_cfg)
         train_cfg = beamdojo_runtime.runner_cfg_dict(agent_cfg)
         if agent_cfg.class_name == "OnPolicyRunner":
             runner = OnPolicyRunner(env, train_cfg, log_dir=log_dir, device=agent_cfg.device)

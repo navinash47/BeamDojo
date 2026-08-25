@@ -312,6 +312,51 @@ def leftover_h1_torso_name(names) -> bool:
     return names_as_list(names) == ["torso"]
 
 
+QUAD_ROBOT_MARKERS = (
+    "anymal",
+    "anybotics",
+    "unitree_a1",
+    "/a1/",
+    "go1",
+    "go2",
+    "spot",
+    "cassie",
+    "digit",
+    "aliengo",
+)
+BEAM_TOP_Z = 0.28  # BEAM_CENTER_Z + BEAM_THICKNESS/2; scene_props imports Isaac.
+
+
+def leftover_quadruped_robot(env_cfg) -> bool:
+    """True when leftover scene.robot is ANYmal/quad USD H1/G1 cannot resolve."""
+    blob = _robot_identity_blob(env_cfg)
+    return any(marker in blob for marker in QUAD_ROBOT_MARKERS)
+
+
+def leftover_full_unitree_usd(env_cfg) -> bool:
+    """Full H1/G1 USD (not *_minimal) OOMs 1024 envs on A10 24GB before W&B."""
+    blob = _robot_identity_blob(env_cfg)
+    if "usd" not in blob or "minimal" in blob:
+        return False
+    return bool(re.search(r"(?:^|[^a-z0-9])(h1|g1)(?:[^a-z0-9]|$)", blob))
+
+
+def desired_train_robot(env_cfg) -> str | None:
+    """``g1`` / ``h1`` from the env class, else USD / leftover fingers."""
+    name = type(env_cfg).__name__.lower()
+    if re.search(r"(?:^|[^a-z0-9])g1(?:[^a-z0-9]|$)", name):
+        return "g1"
+    if re.search(r"(?:^|[^a-z0-9])h1(?:[^a-z0-9]|$)", name):
+        return "h1"
+    kind = env_cfg_robot_kind(env_cfg)
+    if kind in ("g1", "h1"):
+        return kind
+    rewards = getattr(env_cfg, "rewards", None)
+    if rewards is not None and getattr(rewards, "joint_deviation_fingers", None) is not None:
+        return "g1"
+    return None
+
+
 def _ensure_obs_groups(train_cfg: dict) -> None:
     """Isaac Lab 2.3.2 ``obs_groups`` defaults to ``MISSING``.
 
@@ -344,16 +389,11 @@ def _reassert_double_critic_class_names(train_cfg: dict) -> None:
         return
     if algorithm.get("class_name") == "Distillation":
         return
-    if algorithm.get("class_name") in (None, "", "PPO"):
+    if algorithm.get("class_name") != "PPODoubleCritic":
         print("[WARN] Restoring leftover algorithm.class_name to PPODoubleCritic.")
         algorithm["class_name"] = "PPODoubleCritic"
     policy = train_cfg.get("policy")
-    if isinstance(policy, dict) and policy.get("class_name") in (
-        None,
-        "",
-        "ActorCritic",
-        "ActorCriticRecurrent",
-    ):
+    if isinstance(policy, dict) and policy.get("class_name") != "ActorCriticDouble":
         print("[WARN] Restoring leftover policy.class_name to ActorCriticDouble.")
         policy["class_name"] = "ActorCriticDouble"
 
@@ -412,6 +452,30 @@ def _ensure_runner_intervals(train_cfg: dict) -> None:
         train_cfg["save_interval"] = 100
 
 
+def _reassert_noise_std_type(train_cfg: dict) -> None:
+    """ActorCritic 3.0.1 ValueErrors on leftover ``noise_std_type`` before W&B."""
+    policy = train_cfg.get("policy")
+    if not isinstance(policy, dict):
+        return
+    nst = policy.get("noise_std_type")
+    if nst in (None, "scalar", "log"):
+        return
+    print(f"[WARN] Restoring leftover policy.noise_std_type={nst!r} to 'scalar'.")
+    policy["noise_std_type"] = "scalar"
+
+
+def reassert_runner_class(agent_cfg) -> None:
+    """Hydra leftover ``DistillationRunner`` / empty class_name dies at runner construct."""
+    name = getattr(agent_cfg, "class_name", None)
+    if name in ("OnPolicyRunner", "DistillationRunner"):
+        return
+    print(f"[WARN] Restoring leftover agent class_name={name!r} to OnPolicyRunner.")
+    try:
+        agent_cfg.class_name = "OnPolicyRunner"
+    except Exception as exc:
+        print(f"[WARN] Runner class reassert skipped ({type(exc).__name__}: {exc})")
+
+
 def sanitize_rsl_rl_train_cfg(train_cfg: dict) -> dict:
     """Drop empty Hydra RND/symmetry dicts before OnPolicyRunner / PPO 3.0.1.
 
@@ -432,6 +496,7 @@ def sanitize_rsl_rl_train_cfg(train_cfg: dict) -> dict:
     _reassert_paper_mlp(train_cfg)
     _drop_on_policy_runner_kwarg_collisions(train_cfg)
     _ensure_runner_intervals(train_cfg)
+    _reassert_noise_std_type(train_cfg)
     return train_cfg
 
 
@@ -640,6 +705,145 @@ def _reassert_physx_floors(env_cfg) -> None:
             "A 16M leftover OOMs A10 24GB before wandb.init."
         )
         setattr(physx, "gpu_max_rigid_contact_count", PHYSX_A10_UNSAFE_FLOOR)
+
+
+def expected_pelvis_z(env_cfg, spec) -> float:
+    if getattr(getattr(env_cfg, "scene", None), "catcher", None) is not None:
+        return float(spec.pelvis_z) + BEAM_TOP_Z
+    return float(spec.pelvis_z)
+
+
+def _set_init_pelvis_z(env_cfg, z: float) -> None:
+    robot = getattr(getattr(env_cfg, "scene", None), "robot", None)
+    if robot is None:
+        return
+    state = getattr(robot, "init_state", None)
+    if state is None and isinstance(robot, dict):
+        state = robot.get("init_state")
+    pos = None
+    if isinstance(state, dict):
+        pos = state.get("pos")
+    elif state is not None:
+        pos = getattr(state, "pos", None)
+    try:
+        xy = (float(pos[0]), float(pos[1])) if pos is not None else (0.0, 0.0)
+    except (TypeError, ValueError, IndexError):
+        xy = (0.0, 0.0)
+    new_pos = (xy[0], xy[1], float(z))
+    if isinstance(state, dict):
+        state["pos"] = new_pos
+    elif state is not None and hasattr(state, "pos"):
+        state.pos = new_pos
+
+
+def _stamp_unitree_usd(env_cfg, spec_name: str) -> None:
+    scene = getattr(env_cfg, "scene", None)
+    if scene is None:
+        return
+    usd = f"/Isaac/Robots/Unitree/{spec_name.upper()}/{spec_name}_minimal.usd"
+    robot = getattr(scene, "robot", None)
+    if robot is None:
+        scene.robot = type("Robot", (), {"usd_path": usd})()
+        return
+    spawn = getattr(robot, "spawn", None)
+    if spawn is not None and hasattr(spawn, "usd_path"):
+        spawn.usd_path = usd
+    elif isinstance(robot, dict):
+        robot["usd_path"] = usd
+    elif hasattr(robot, "usd_path"):
+        robot.usd_path = usd
+
+
+def _reassert_unitree_robot(env_cfg) -> None:
+    """Leftover ANYmal / full H1 USD crashes or OOMs gym.make before wandb.init."""
+    desired = desired_train_robot(env_cfg)
+    kind = env_cfg_robot_kind(env_cfg)
+    need = leftover_quadruped_robot(env_cfg) or leftover_full_unitree_usd(env_cfg)
+    if desired and kind and desired != kind:
+        need = True
+    spec_name = desired or kind
+    if not need:
+        if spec_name:
+            _reassert_pelvis_height(env_cfg, spec_name)
+        return
+    spec_name = spec_name or "h1"
+    print(f"[WARN] Restoring leftover scene.robot to Unitree {spec_name} minimal USD.")
+    try:
+        from h1_cfg.beamdojo_common import spawn_robot
+        from h1_cfg.robot_spec import G1, H1
+
+        spec = G1 if spec_name == "g1" else H1
+        spawn_robot(env_cfg, spec)
+        if getattr(getattr(env_cfg, "scene", None), "catcher", None) is None:
+            env_cfg.scene.robot.init_state.pos = (0.0, 0.0, spec.pelvis_z)
+        return
+    except ImportError:
+        pass
+    from h1_cfg.robot_spec import G1, H1
+
+    spec = G1 if spec_name == "g1" else H1
+    _stamp_unitree_usd(env_cfg, spec_name)
+    _set_init_pelvis_z(env_cfg, expected_pelvis_z(env_cfg, spec))
+
+
+def _reassert_pelvis_height(env_cfg, spec_name: str) -> None:
+    """ANYmal leftover z≈0.6 buries H1/G1; PhysX explodes at the first reset."""
+    try:
+        from h1_cfg.robot_spec import G1, H1
+    except ImportError:
+        return
+    spec = G1 if spec_name == "g1" else H1
+    expected = expected_pelvis_z(env_cfg, spec)
+    current = _init_pelvis_z(env_cfg)
+    if current is None or abs(current - expected) <= 0.10:
+        return
+    print(f"[WARN] Restoring leftover robot init z {current:.2f} → {expected:.2f} ({spec_name}).")
+    _set_init_pelvis_z(env_cfg, expected)
+
+
+def _reassert_env_spacing(env_cfg) -> None:
+    """Parent leftover ``env_spacing=2.5`` overlaps 1024 H1s at gym.make reset."""
+    scene = getattr(env_cfg, "scene", None)
+    if scene is None or not hasattr(scene, "env_spacing"):
+        return
+    try:
+        spacing = float(scene.env_spacing)
+    except (TypeError, ValueError):
+        return
+    if spacing < 6.0:
+        print("[WARN] Restoring leftover env_spacing to 8.0 (parent 2.5 overlaps 1024 envs).")
+        scene.env_spacing = 8.0
+
+
+def _reassert_contact_history(env_cfg) -> None:
+    """``feet_air_time`` reads history at the first reset — before wandb.init."""
+    contact = getattr(getattr(env_cfg, "scene", None), "contact_forces", None)
+    if contact is None:
+        return
+    hist = getattr(contact, "history_length", None)
+    try:
+        length = int(hist)
+    except (TypeError, ValueError):
+        length = 0
+    if length < 3:
+        print("[WARN] Restoring leftover contact_forces.history_length=3.")
+        contact.history_length = 3
+    if hasattr(contact, "track_air_time") and not contact.track_air_time:
+        print("[WARN] Enabling leftover contact_forces.track_air_time.")
+        contact.track_air_time = True
+
+
+def _reassert_stage1_timeout_only(env_cfg) -> None:
+    """Stage 1 is timeout-only. Leftover parent base_contact fires on the plane."""
+    if getattr(getattr(env_cfg, "scene", None), "catcher", None) is not None:
+        return
+    terms = getattr(env_cfg, "terminations", None)
+    if terms is None:
+        return
+    for name in ("base_contact", "base_height", "base_orientation"):
+        if getattr(terms, name, None) is not None:
+            print(f"[WARN] Clearing leftover terminations.{name} (Stage 1 is timeout-only).")
+            setattr(terms, name, None)
 
 
 def _reassert_g1_action_joints(env_cfg) -> None:
@@ -997,6 +1201,7 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
         print("[WARN] Clearing leftover curriculum.terrain_levels (plane has no generator).")
         curriculum.terrain_levels = None
 
+    _reassert_unitree_robot(env_cfg)
     _reassert_anymal_body_names(env_cfg)
     _reassert_g1_action_joints(env_cfg)
     _reassert_g1_joint_fullmatch(env_cfg)
@@ -1004,6 +1209,9 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     _reassert_h1_joint_fullmatch(env_cfg)
     _reassert_official_reset_events(env_cfg)
     _reassert_stage2_reset_on_beam(env_cfg)
+    _reassert_stage1_timeout_only(env_cfg)
+    _reassert_env_spacing(env_cfg)
+    _reassert_contact_history(env_cfg)
     _reassert_infinite_horizon(env_cfg)
     _reassert_physx_floors(env_cfg)
 

@@ -176,6 +176,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     # load previously trained model
+    beamdojo_runtime.reassert_runner_class(agent_cfg)
     train_cfg = beamdojo_runtime.runner_cfg_dict(agent_cfg)
     if agent_cfg.class_name == "OnPolicyRunner":
         runner = OnPolicyRunner(env, train_cfg, log_dir=None, device=agent_cfg.device)

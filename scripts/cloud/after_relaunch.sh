@@ -91,6 +91,14 @@ if ! grep -q "def _drop_h1_leftover_fingers" "$REPO/scripts/rsl_rl/beamdojo_runt
   echo "beamdojo_runtime.py is missing H1 leftover finger drop. Pull ${REF} or leftover G1 fingers crash resolve_matching_names on H1." >&2
   exit 1
 fi
+if ! grep -q "def _reassert_unitree_robot" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing Unitree robot reassert. Pull ${REF} or leftover ANYmal USD crashes gym.make before W&B." >&2
+  exit 1
+fi
+if ! grep -q "def _reassert_contact_history" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing contact history reassert. Pull ${REF} or leftover history_length=0 dies at the first reset." >&2
+  exit 1
+fi
 if ! grep -q "def apply_physx_gpu_capacity" "$REPO/h1_cfg/beamdojo_common.py"; then
   echo "beamdojo_common.py is missing PhysX GPU buffer bump. Pull ${REF} or cloned beams/stones overflow contact buffers." >&2
   exit 1
