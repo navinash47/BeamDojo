@@ -1812,6 +1812,13 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         )
         self.assertTrue(self.rt.leftover_missing_sim(type("C", (), {"sim": None})()))
         self.assertFalse(self.rt.leftover_missing_sim(type("C", (), {"sim": object()})()))
+        self.assertTrue(self.rt.leftover_missing_rewards(type("C", (), {"rewards": None})()))
+        self.assertTrue(self.rt.leftover_missing_events(type("C", (), {"events": None})()))
+        self.assertTrue(self.rt.leftover_missing_terminations(type("C", (), {"terminations": None})()))
+        self.assertTrue(self.rt.leftover_missing_time_out(type("C", (), {"terminations": None})()))
+        self.assertTrue(self.rt.leftover_invalid_obs_scale(None))
+        self.assertTrue(self.rt.leftover_invalid_obs_scale(0.0))
+        self.assertFalse(self.rt.leftover_invalid_obs_scale(2.0))
         h1_act = type(
             "BeamDojoStage1EnvCfg",
             (),
@@ -2469,6 +2476,42 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertEqual(missing_sim.sim.dt, 0.005)
         self.assertEqual(missing_sim.sim.device, "cuda:0")
         self.assertFalse(missing_sim.sim.wait_for_textures)
+        self.assertIsNotNone(missing_sim.rewards)
+        self.assertIsNotNone(missing_sim.events)
+        self.assertIsNotNone(missing_sim.terminations)
+        self.assertIsNotNone(missing_sim.curriculum)
+        self.assertIsNotNone(missing_sim.terminations.time_out)
+
+        lin = type("T", (), {"func": object(), "scale": None})()
+        ang = type("T", (), {"func": object(), "scale": 0.0})()
+        grav = type("T", (), {"func": object(), "scale": 1.0})()
+        scaled = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})(),
+                    },
+                )(),
+                "observations": type(
+                    "O",
+                    (),
+                    {"policy": type("P", (), {"base_lin_vel": lin, "base_ang_vel": ang, "projected_gravity": grav})()},
+                )(),
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(scaled)
+        self.assertEqual(lin.scale, 2.0)
+        self.assertEqual(ang.scale, 0.25)
+        self.assertEqual(grav.scale, 1.0)
 
     def test_leftover_quad_and_full_usd_helpers(self):
         anymal = type(
@@ -2653,6 +2696,11 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_fixed_root_robot", runtime)
         self.assertIn("def leftover_self_collisions_robot", runtime)
         self.assertIn("def leftover_missing_sim", runtime)
+        self.assertIn("def leftover_missing_rewards", runtime)
+        self.assertIn("def leftover_missing_events", runtime)
+        self.assertIn("def leftover_missing_terminations", runtime)
+        self.assertIn("def leftover_missing_time_out", runtime)
+        self.assertIn("def leftover_invalid_obs_scale", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -2738,6 +2786,10 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_kinematic_robot", relaunch)
         self.assertIn("leftover_self_collisions_robot", relaunch)
         self.assertIn("leftover_missing_sim", relaunch)
+        self.assertIn("leftover_missing_rewards", relaunch)
+        self.assertIn("leftover_missing_events", relaunch)
+        self.assertIn("leftover_missing_terminations", relaunch)
+        self.assertIn("leftover_invalid_obs_scale", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)

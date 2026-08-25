@@ -231,6 +231,22 @@ if ! grep -q "def leftover_missing_sim" "$REPO/scripts/rsl_rl/beamdojo_runtime.p
   echo "beamdojo_runtime.py is missing leftover sim restore. Pull ${REF} or Hydra env_cfg.sim=None dies at gym.make." >&2
   exit 1
 fi
+if ! grep -q "def leftover_missing_rewards" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover rewards restore. Pull ${REF} or Hydra rewards=None dies at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_missing_events" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover events restore. Pull ${REF} or Hydra events=None dies at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_missing_terminations" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover terminations restore. Pull ${REF} or Hydra terminations=None dies at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_invalid_obs_scale" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover obs-scale restore. Pull ${REF} or scale=None TypeErrors at first reset." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1

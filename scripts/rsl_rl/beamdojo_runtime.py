@@ -810,6 +810,43 @@ def leftover_missing_term_func(term) -> bool:
     return hasattr(term, "func") and getattr(term, "func") is None
 
 
+def leftover_missing_rewards(env_cfg) -> bool:
+    return env_cfg is not None and getattr(env_cfg, "rewards", None) is None
+
+
+def leftover_missing_events(env_cfg) -> bool:
+    return env_cfg is not None and getattr(env_cfg, "events", None) is None
+
+
+def leftover_missing_terminations(env_cfg) -> bool:
+    return env_cfg is not None and getattr(env_cfg, "terminations", None) is None
+
+
+def leftover_missing_curriculum(env_cfg) -> bool:
+    return env_cfg is not None and getattr(env_cfg, "curriculum", None) is None
+
+
+def leftover_missing_time_out(env_cfg) -> bool:
+    """Stage 1 is timeout-only. Missing ``time_out`` never ends an episode."""
+    terms = getattr(env_cfg, "terminations", None) if env_cfg is not None else None
+    if terms is None:
+        return True
+    if isinstance(terms, dict):
+        return terms.get("time_out") is None
+    return getattr(terms, "time_out", None) is None
+
+
+def leftover_invalid_obs_scale(value) -> bool:
+    """``scale=None`` TypeErrors ObservationManager at first reset — before W&B."""
+    if isinstance(value, dict):
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return True
+    return number != number or number <= 0.0
+
+
 def leftover_invalid_env_spacing(scene) -> bool:
     """``None`` / parent ``2.5`` overlaps 1024 H1s at gym.make. Play ``6.0`` stays."""
     if scene is None or not hasattr(scene, "env_spacing"):
@@ -2041,6 +2078,84 @@ def _reassert_missing_policy_obs(env_cfg) -> None:
     _manager_set(obs, "policy", policy)
 
 
+def _restore_manager_cfg(kind: str):
+    try:
+        from h1_cfg.beamdojo_env_base import (
+            BeamDojoCurriculumCfg,
+            BeamDojoEventCfg,
+            BeamDojoRewardsCfg,
+            BeamDojoTerminationsCfg,
+        )
+
+        return {
+            "rewards": BeamDojoRewardsCfg,
+            "events": BeamDojoEventCfg,
+            "terminations": BeamDojoTerminationsCfg,
+            "curriculum": BeamDojoCurriculumCfg,
+        }[kind]()
+    except ImportError:
+        pass
+    try:
+        from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import (
+            CurriculumCfg,
+            EventCfg,
+            RewardsCfg,
+            TerminationsCfg,
+        )
+
+        return {
+            "rewards": RewardsCfg,
+            "events": EventCfg,
+            "terminations": TerminationsCfg,
+            "curriculum": CurriculumCfg,
+        }[kind]()
+    except ImportError:
+        if kind == "terminations":
+            return type(
+                "Terminations",
+                (),
+                {"time_out": type("DoneTerm", (), {"func": type("F", (), {"__name__": "time_out"})()})()},
+            )()
+        return type(kind.title(), (), {})()
+
+
+def _reassert_missing_managers(env_cfg) -> None:
+    """Leftover nulled rewards/events/terminations/curriculum die in managers at gym.make."""
+    if leftover_missing_rewards(env_cfg):
+        print("[WARN] Restoring leftover rewards (RewardManager at gym.make).")
+        env_cfg.rewards = _restore_manager_cfg("rewards")
+    if leftover_missing_events(env_cfg):
+        print("[WARN] Restoring leftover events (EventManager at gym.make).")
+        env_cfg.events = _restore_manager_cfg("events")
+    if leftover_missing_terminations(env_cfg):
+        print("[WARN] Restoring leftover terminations (TerminationManager at gym.make).")
+        env_cfg.terminations = _restore_manager_cfg("terminations")
+    if leftover_missing_curriculum(env_cfg):
+        print("[WARN] Restoring leftover curriculum (CurriculumManager at gym.make).")
+        env_cfg.curriculum = _restore_manager_cfg("curriculum")
+
+
+def _reassert_missing_time_out(env_cfg) -> None:
+    if not leftover_missing_time_out(env_cfg):
+        return
+    print("[WARN] Restoring leftover terminations.time_out (Stage 1 timeout-only).")
+    terms = getattr(env_cfg, "terminations", None)
+    if terms is None:
+        env_cfg.terminations = type("Terminations", (), {})()
+        terms = env_cfg.terminations
+    try:
+        import isaaclab.envs.mdp as mdp
+        from isaaclab.managers import TerminationTermCfg as DoneTerm
+
+        _manager_set(terms, "time_out", DoneTerm(func=mdp.time_out))
+    except ImportError:
+        _manager_set(
+            terms,
+            "time_out",
+            type("DoneTerm", (), {"func": type("F", (), {"__name__": "time_out"})()})(),
+        )
+
+
 def _reassert_obs_history(env_cfg) -> None:
     """Leftover RNN ``history_length`` OOMs 1024 envs; leftover ``func=None`` dies at gym.make."""
     obs = getattr(env_cfg, "observations", None)
@@ -2061,6 +2176,16 @@ def _reassert_obs_history(env_cfg) -> None:
                 else:
                     setattr(group, term_name, None)
                 continue
+            if term is not None and (
+                isinstance(term, dict) or hasattr(term, "scale")
+            ) and leftover_invalid_obs_scale(_manager_get(term, "scale")):
+                restored = {"base_lin_vel": 2.0, "base_ang_vel": 0.25, "projected_gravity": 1.0}.get(
+                    term_name, 1.0
+                )
+                print(
+                    f"[WARN] Restoring leftover observations.{group_name}.{term_name}.scale to {restored}."
+                )
+                _manager_set(term, "scale", restored)
             if term is not None and (
                 isinstance(term, dict) or hasattr(term, "history_length")
             ) and leftover_excess_obs_history(_manager_get(term, "history_length")):
@@ -2947,6 +3072,7 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     _reassert_obs_height_scan(env_cfg)
     _reassert_obs_history(env_cfg)
     _reassert_velocity_command(env_cfg)
+    _reassert_missing_managers(env_cfg)
 
     sim = getattr(env_cfg, "sim", None)
     mat = getattr(terrain, "physics_material", None) if terrain is not None else None
@@ -2986,6 +3112,7 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     _reassert_event_joint_names(env_cfg)
     _reassert_stage2_reset_on_beam(env_cfg)
     _reassert_stage1_timeout_only(env_cfg)
+    _reassert_missing_time_out(env_cfg)
     _reassert_env_spacing(env_cfg)
     _reassert_contact_history(env_cfg)
     _reassert_contact_filters(env_cfg)
