@@ -530,6 +530,50 @@ def leftover_disabled_collision_asset(asset) -> bool:
     return flag is False
 
 
+def leftover_kinematic_robot(robot) -> bool:
+    """Catcher cuboid leftover ``kinematic_enabled=True`` on the robot welds it in place."""
+    spawn = _asset_spawn(robot)
+    if spawn is None:
+        return False
+    props = spawn.get("rigid_props") if isinstance(spawn, dict) else getattr(spawn, "rigid_props", None)
+    flag = props.get("kinematic_enabled") if isinstance(props, dict) else getattr(props, "kinematic_enabled", None)
+    return flag is True
+
+
+def leftover_disabled_gravity_robot(robot) -> bool:
+    """Catcher leftover ``disable_gravity=True`` on the robot floats it off the beam."""
+    spawn = _asset_spawn(robot)
+    if spawn is None:
+        return False
+    props = spawn.get("rigid_props") if isinstance(spawn, dict) else getattr(spawn, "rigid_props", None)
+    flag = props.get("disable_gravity") if isinstance(props, dict) else getattr(props, "disable_gravity", None)
+    return flag is True
+
+
+def leftover_fixed_root_robot(robot) -> bool:
+    """Leftover ``fix_root_link=True`` welds the pelvis; first reset still runs but never walks."""
+    spawn = _asset_spawn(robot)
+    if spawn is None:
+        return False
+    props = spawn.get("articulation_props") if isinstance(spawn, dict) else getattr(spawn, "articulation_props", None)
+    flag = props.get("fix_root_link") if isinstance(props, dict) else getattr(props, "fix_root_link", None)
+    return flag is True
+
+
+def leftover_self_collisions_robot(robot) -> bool:
+    """Leftover ``enabled_self_collisions=True`` can explode PhysX at the first reset."""
+    spawn = _asset_spawn(robot)
+    if spawn is None:
+        return False
+    props = spawn.get("articulation_props") if isinstance(spawn, dict) else getattr(spawn, "articulation_props", None)
+    flag = (
+        props.get("enabled_self_collisions")
+        if isinstance(props, dict)
+        else getattr(props, "enabled_self_collisions", None)
+    )
+    return flag is True
+
+
 def leftover_invalid_root_rot(rot) -> bool:
     """Zero / NaN / non-4-tuple quats NaN PhysX at the first reset — before W&B."""
     if rot is None:
@@ -2387,6 +2431,17 @@ def _enable_spawn_collision(asset) -> None:
         spawn.collision_enabled = True
 
 
+def _set_spawn_prop(spawn, props_name: str, field: str, value) -> None:
+    if spawn is None:
+        return
+    props = spawn.get(props_name) if isinstance(spawn, dict) else getattr(spawn, props_name, None)
+    if isinstance(props, dict):
+        props[field] = value
+        return
+    if props is not None and hasattr(props, field):
+        setattr(props, field, value)
+
+
 def _reassert_robot_collision(env_cfg) -> None:
     """Leftover visual-only robot (``collision_enabled=False``) falls through at reset."""
     robot = getattr(getattr(env_cfg, "scene", None), "robot", None)
@@ -2394,6 +2449,24 @@ def _reassert_robot_collision(env_cfg) -> None:
         return
     print("[WARN] Enabling leftover robot collision (visual-only robot falls through).")
     _enable_spawn_collision(robot)
+
+
+def _reassert_robot_dynamics(env_cfg) -> None:
+    """Catcher cuboid leftover on the robot welds/floats it; self-collisions die at reset."""
+    robot = getattr(getattr(env_cfg, "scene", None), "robot", None)
+    spawn = _asset_spawn(robot)
+    if leftover_kinematic_robot(robot):
+        print("[WARN] Disabling leftover robot kinematic_enabled (catcher cuboid props on H1/G1).")
+        _set_spawn_prop(spawn, "rigid_props", "kinematic_enabled", False)
+    if leftover_disabled_gravity_robot(robot):
+        print("[WARN] Enabling leftover robot gravity (catcher disable_gravity on H1/G1).")
+        _set_spawn_prop(spawn, "rigid_props", "disable_gravity", False)
+    if leftover_fixed_root_robot(robot):
+        print("[WARN] Clearing leftover robot fix_root_link (welded pelvis).")
+        _set_spawn_prop(spawn, "articulation_props", "fix_root_link", False)
+    if leftover_self_collisions_robot(robot):
+        print("[WARN] Disabling leftover robot enabled_self_collisions (PhysX at first reset).")
+        _set_spawn_prop(spawn, "articulation_props", "enabled_self_collisions", False)
 
 
 def _reassert_missing_scene_entity_terms(env_cfg) -> None:
@@ -2871,6 +2944,7 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     _reassert_clone_prim_paths(env_cfg)
     _reassert_unitree_robot(env_cfg)
     _reassert_robot_collision(env_cfg)
+    _reassert_robot_dynamics(env_cfg)
     _drop_leftover_actuators(env_cfg)
     _reassert_init_joint_state(env_cfg)
     _reassert_init_root_rot(env_cfg)
