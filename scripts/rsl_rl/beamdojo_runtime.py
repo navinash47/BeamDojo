@@ -1566,6 +1566,19 @@ def _reassert_logger(train_cfg: dict) -> None:
     train_cfg["logger"] = fallback
 
 
+def leftover_invalid_empirical_normalization(value) -> bool:
+    """OnPolicyRunner copies this onto ActorCritic before wandb.init. Leftover dict TypeErrors."""
+    if value is None:
+        return False
+    return not isinstance(value, bool)
+
+
+def _reassert_empirical_normalization(train_cfg: dict) -> None:
+    if leftover_invalid_empirical_normalization(train_cfg.get("empirical_normalization")):
+        print("[WARN] Restoring leftover empirical_normalization=False (ActorCritic at runner init).")
+        train_cfg["empirical_normalization"] = False
+
+
 def leftover_cpu_device(value) -> bool:
     if value is None:
         return False
@@ -1747,6 +1760,7 @@ def sanitize_rsl_rl_train_cfg(train_cfg: dict) -> dict:
     _reassert_activation(train_cfg)
     _reassert_init_noise_std(train_cfg)
     _reassert_logger(train_cfg)
+    _reassert_empirical_normalization(train_cfg)
     if "clip_actions" in train_cfg:
         train_cfg["clip_actions"] = sanitize_clip_actions(train_cfg.get("clip_actions"))
     return train_cfg

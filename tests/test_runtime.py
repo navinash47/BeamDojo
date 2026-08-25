@@ -802,6 +802,9 @@ class RunnerCfgSanitizeTests(unittest.TestCase):
         self.rt.sanitize_rsl_rl_train_cfg(cfg)
         self.assertEqual(cfg["policy"]["init_noise_std"], 1.0)
         self.assertIsNone(cfg["clip_actions"])
+        cfg["empirical_normalization"] = {}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertFalse(cfg["empirical_normalization"])
 
     def test_leftover_cpu_device_helper(self):
         self.assertTrue(self.rt.leftover_cpu_device("cpu"))
@@ -3078,6 +3081,7 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_invalid_viewer", runtime)
         self.assertIn("def leftover_invalid_seed", runtime)
         self.assertIn("def leftover_invalid_num_rerenders", runtime)
+        self.assertIn("def leftover_invalid_empirical_normalization", runtime)
         self.assertIn("def leftover_excess_obs_history", runtime)
         self.assertIn("def leftover_invalid_action_scale", runtime)
         self.assertIn("def leftover_missing_term_func", runtime)
@@ -3196,6 +3200,7 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_invalid_runner_interval", relaunch)
         self.assertIn("leftover_missing_viewer", relaunch)
         self.assertIn("leftover_invalid_seed", relaunch)
+        self.assertIn("leftover_invalid_empirical_normalization", relaunch)
         self.assertIn("leftover_excess_obs_history", relaunch)
         self.assertIn("leftover_invalid_action_scale", relaunch)
         self.assertIn("leftover_missing_term_func", relaunch)

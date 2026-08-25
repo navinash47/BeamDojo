@@ -235,6 +235,10 @@ if ! grep -q "def leftover_invalid_seed" "$REPO/scripts/rsl_rl/beamdojo_runtime.
   echo "beamdojo_runtime.py is missing leftover seed drop. Pull ${REF} or seed='none' TypeErrors ManagerBasedEnv at gym.make." >&2
   exit 1
 fi
+if ! grep -q "def leftover_invalid_empirical_normalization" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover empirical_normalization restore. Pull ${REF} or a leftover dict TypeErrors ActorCritic before W&B." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_excess_obs_history" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover obs-history clamp. Pull ${REF} or leftover RNN history_length OOMs 1024 envs at gym.make." >&2
   exit 1
