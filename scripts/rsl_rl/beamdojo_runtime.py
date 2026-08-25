@@ -253,6 +253,11 @@ def leftover_all_joints(names) -> bool:
     return len(items) == 1 and items[0] == ".*"
 
 
+def leftover_universal_joint_expr(expr) -> bool:
+    """``.*`` matches every H1 and G1 joint; do not treat it as the other robot."""
+    return str(expr).strip() in {".*", ".+", "*"}
+
+
 def names_as_list(names) -> list[str]:
     if names is None:
         return []
@@ -265,11 +270,18 @@ def names_match(left, right) -> bool:
 
 
 # Official H1 regexes that do not ``re.fullmatch`` G1 ``*_joint`` names.
+# ``.*_hip_pitch`` / ``.*_knee`` / ``.*_shoulder_*`` miss ``*_joint`` the same way
+# ``.*_hip_yaw`` does. ``.*_shoulder_.*`` *does* match G1 shoulders — keep it out.
 H1_JOINTS_MISS_G1 = {
     ".*_hip_yaw",
     ".*_hip_roll",
+    ".*_hip_pitch",
+    ".*_knee",
     ".*_ankle",
     "torso",
+    ".*_shoulder_pitch",
+    ".*_shoulder_roll",
+    ".*_shoulder_yaw",
     ".*_elbow",
 }
 H1_BODIES_MISS_G1 = {".*_ankle_link", ".*ankle_link"}
@@ -310,6 +322,110 @@ def leftover_g1_bodies_for_h1(names) -> bool:
 
 def leftover_h1_torso_name(names) -> bool:
     return names_as_list(names) == ["torso"]
+
+
+# Actual USD joint names for leftover_joint_fullmatches_robot (Isaac 2.3.2 re.fullmatch).
+H1_JOINTS = (
+    "left_hip_yaw",
+    "left_hip_roll",
+    "left_hip_pitch",
+    "left_knee",
+    "left_ankle",
+    "right_hip_yaw",
+    "right_hip_roll",
+    "right_hip_pitch",
+    "right_knee",
+    "right_ankle",
+    "torso",
+    "left_shoulder_pitch",
+    "left_shoulder_roll",
+    "left_shoulder_yaw",
+    "left_elbow",
+    "right_shoulder_pitch",
+    "right_shoulder_roll",
+    "right_shoulder_yaw",
+    "right_elbow",
+)
+_G1_SIDE_JOINTS = (
+    "hip_pitch_joint",
+    "hip_roll_joint",
+    "hip_yaw_joint",
+    "knee_joint",
+    "ankle_pitch_joint",
+    "ankle_roll_joint",
+    "shoulder_pitch_joint",
+    "shoulder_roll_joint",
+    "shoulder_yaw_joint",
+    "elbow_pitch_joint",
+    "elbow_roll_joint",
+    "wrist_roll_joint",
+    "wrist_pitch_joint",
+    "wrist_yaw_joint",
+    "five_joint",
+    "three_joint",
+    "six_joint",
+    "four_joint",
+    "zero_joint",
+    "one_joint",
+    "two_joint",
+)
+G1_JOINTS = tuple(f"{side}_{name}" for side in ("left", "right") for name in _G1_SIDE_JOINTS) + (
+    "waist_yaw_joint",
+    "waist_roll_joint",
+    "waist_pitch_joint",
+    "torso_joint",
+)
+G1_FINGER_MARKERS = (
+    "five_joint",
+    "three_joint",
+    "six_joint",
+    "four_joint",
+    "zero_joint",
+    "one_joint",
+    "two_joint",
+)
+_ACTUATOR_MAP_FIELDS = ("stiffness", "damping", "armature", "effort_limit", "velocity_limit")
+
+
+def leftover_joint_fullmatches_robot(pattern, joints) -> bool:
+    try:
+        regex = re.compile(str(pattern))
+    except re.error:
+        return False
+    return any(regex.fullmatch(joint) for joint in joints)
+
+
+def leftover_joint_misses_robot(pattern, joints) -> bool:
+    return not leftover_joint_fullmatches_robot(pattern, joints)
+
+
+def leftover_g1_finger_name(name) -> bool:
+    text = str(name).lower()
+    return any(marker in text for marker in G1_FINGER_MARKERS)
+
+
+def leftover_h1_joint_name(name) -> bool:
+    """H1 leftover names that miss G1 ``*_joint`` fullmatch (not universal ``.*``)."""
+    text = str(name)
+    if leftover_universal_joint_expr(text):
+        return False
+    if leftover_h1_joints_for_g1(text):
+        return True
+    if leftover_joint_fullmatches_robot(text, G1_JOINTS):
+        return False
+    return "_joint" not in text
+
+
+def leftover_g1_joint_name(name) -> bool:
+    """G1 leftover ``*_joint`` / finger names that miss official H1 joints."""
+    text = str(name)
+    if leftover_universal_joint_expr(text):
+        return False
+    if leftover_g1_joints_for_h1(text) or leftover_g1_finger_name(text):
+        return True
+    if leftover_joint_fullmatches_robot(text, H1_JOINTS):
+        return False
+    return "_joint" in text
 
 
 QUAD_ROBOT_MARKERS = (
@@ -625,11 +741,41 @@ def leftover_quadruped_actuator(actuator) -> bool:
     )
     if any(leftover_quadruped_joint_key(item) for item in names_as_list(names)):
         return True
-    for field in ("stiffness", "damping", "armature", "effort_limit", "velocity_limit"):
+    for field in _ACTUATOR_MAP_FIELDS:
         mapping = actuator.get(field) if isinstance(actuator, dict) else getattr(actuator, field, None)
         if isinstance(mapping, dict) and any(leftover_quadruped_joint_key(key) for key in mapping):
             return True
     return False
+
+
+def leftover_actuator_joint_names(actuator) -> list[str]:
+    if actuator is None:
+        return []
+    names = actuator.get("joint_names_expr") if isinstance(actuator, dict) else getattr(
+        actuator, "joint_names_expr", None
+    )
+    items = names_as_list(names)
+    for field in _ACTUATOR_MAP_FIELDS:
+        mapping = actuator.get(field) if isinstance(actuator, dict) else getattr(actuator, field, None)
+        if isinstance(mapping, dict):
+            items.extend(str(key) for key in mapping)
+    return items
+
+
+def leftover_actuator_misses_robot(actuator, joints) -> bool:
+    return any(
+        leftover_joint_misses_robot(name, joints)
+        for name in leftover_actuator_joint_names(actuator)
+        if not leftover_universal_joint_expr(name)
+    )
+
+
+def leftover_h1_actuator(actuator) -> bool:
+    return any(leftover_h1_joint_name(name) for name in leftover_actuator_joint_names(actuator))
+
+
+def leftover_g1_actuator(actuator) -> bool:
+    return any(leftover_g1_joint_name(name) for name in leftover_actuator_joint_names(actuator))
 
 
 def leftover_quadruped_actuators(env_cfg) -> bool:
@@ -898,6 +1044,39 @@ def _treat_as_h1(env_cfg) -> bool:
     return env_cfg_robot_kind(env_cfg) == "h1"
 
 
+def leftover_wrong_robot_joint_key(key, env_cfg) -> bool:
+    """Hydra leftover H1 keys on G1 (or reverse) ValueError at gym.make."""
+    if leftover_quadruped_joint_key(key):
+        return True
+    if leftover_universal_joint_expr(key):
+        return False
+    if _treat_as_g1(env_cfg):
+        return leftover_h1_joint_name(key) or leftover_joint_misses_robot(key, G1_JOINTS)
+    if _treat_as_h1(env_cfg):
+        return leftover_g1_joint_name(key) or leftover_joint_misses_robot(key, H1_JOINTS)
+    return False
+
+
+def leftover_wrong_robot_actuator(actuator, env_cfg) -> bool:
+    if leftover_quadruped_actuator(actuator):
+        return True
+    if _treat_as_g1(env_cfg):
+        return leftover_h1_actuator(actuator) or leftover_actuator_misses_robot(actuator, G1_JOINTS)
+    if _treat_as_h1(env_cfg):
+        return leftover_g1_actuator(actuator) or leftover_actuator_misses_robot(actuator, H1_JOINTS)
+    return False
+
+
+def leftover_wrong_robot_actuators(env_cfg) -> bool:
+    robot = getattr(getattr(env_cfg, "scene", None), "robot", None)
+    if robot is None:
+        return False
+    actuators = getattr(robot, "actuators", None)
+    if actuators is None and isinstance(robot, dict):
+        actuators = robot.get("actuators")
+    return any(leftover_wrong_robot_actuator(act, env_cfg) for _, act in _actuator_items(actuators))
+
+
 def _scene_uses_stones(scene) -> bool:
     return scene is not None and getattr(scene, "task_stone_0", None) is not None
 
@@ -986,6 +1165,7 @@ def _reassert_unitree_robot(env_cfg) -> None:
         leftover_quadruped_robot(env_cfg)
         or leftover_full_unitree_usd(env_cfg)
         or leftover_quadruped_actuators(env_cfg)
+        or leftover_wrong_robot_actuators(env_cfg)
     )
     if desired and kind and desired != kind:
         need = True
@@ -1042,7 +1222,7 @@ def _set_joint_map(state, field: str, value) -> None:
 
 
 def _reassert_init_joint_state(env_cfg) -> None:
-    """Hydra leftover ANYmal ``.*HAA`` keys ValueError on H1/G1 at gym.make."""
+    """Hydra leftover ANYmal / H1-on-G1 / G1-on-H1 keys ValueError at gym.make."""
     state = _robot_init_state(env_cfg)
     if state is None:
         return
@@ -1050,11 +1230,13 @@ def _reassert_init_joint_state(env_cfg) -> None:
         mapping = _joint_map(state, field)
         if not mapping:
             continue
-        cleaned = {key: mapping[key] for key in mapping if not leftover_quadruped_joint_key(key)}
+        cleaned = {
+            key: mapping[key] for key in mapping if not leftover_wrong_robot_joint_key(key, env_cfg)
+        }
         if len(cleaned) == len(mapping):
             continue
         dropped = [key for key in mapping if key not in cleaned]
-        print(f"[WARN] Dropping leftover quadruped init_state.{field} keys {dropped}.")
+        print(f"[WARN] Dropping leftover init_state.{field} keys {dropped}.")
         _set_joint_map(state, field, cleaned)
 
 
@@ -1069,24 +1251,28 @@ def _robot_attr(env_cfg, name: str):
 
 
 def _drop_leftover_actuators(env_cfg) -> None:
-    """Isaac-free path: drop leftover Go1 nets / ANYmal actuator groups."""
+    """Isaac-free path: drop leftover Go1 nets / ANYmal / H1↔G1 actuator groups."""
     actuators = _robot_attr(env_cfg, "actuators")
     if actuators is None:
         return
     if isinstance(actuators, dict):
-        drop = [name for name, act in list(actuators.items()) if leftover_quadruped_actuator(act)]
+        drop = [
+            name
+            for name, act in list(actuators.items())
+            if leftover_wrong_robot_actuator(act, env_cfg)
+        ]
         for name in drop:
-            print(f"[WARN] Dropping leftover robot.actuators[{name!r}] (quad / Nucleus net).")
+            print(f"[WARN] Dropping leftover robot.actuators[{name!r}] (quad / wrong-robot / Nucleus).")
             actuators.pop(name, None)
         return
     for name, act in _actuator_items(actuators):
-        if leftover_quadruped_actuator(act) and hasattr(actuators, name):
-            print(f"[WARN] Dropping leftover robot.actuators.{name} (quad / Nucleus net).")
+        if leftover_wrong_robot_actuator(act, env_cfg) and hasattr(actuators, name):
+            print(f"[WARN] Dropping leftover robot.actuators.{name} (quad / wrong-robot / Nucleus).")
             setattr(actuators, name, None)
 
 
 def _reassert_action_joint_maps(env_cfg) -> None:
-    """Leftover ``scale={{'.*HAA': 0.5}}`` ValueErrors ActionManager at gym.make."""
+    """Leftover ``scale={{'.*HAA': 0.5}}`` / H1-on-G1 keys ValueError at gym.make."""
     joint_pos = getattr(getattr(env_cfg, "actions", None), "joint_pos", None)
     if joint_pos is None:
         return
@@ -1094,10 +1280,10 @@ def _reassert_action_joint_maps(env_cfg) -> None:
         value = joint_pos.get(field) if isinstance(joint_pos, dict) else getattr(joint_pos, field, None)
         if not isinstance(value, dict):
             continue
-        cleaned = {key: value[key] for key in value if not leftover_quadruped_joint_key(key)}
+        cleaned = {key: value[key] for key in value if not leftover_wrong_robot_joint_key(key, env_cfg)}
         if len(cleaned) == len(value):
             continue
-        print(f"[WARN] Dropping leftover actions.joint_pos.{field} quadruped keys.")
+        print(f"[WARN] Dropping leftover actions.joint_pos.{field} keys.")
         restored: dict | float | None = cleaned if cleaned else (0.25 if field == "scale" else None)
         if isinstance(joint_pos, dict):
             joint_pos[field] = restored

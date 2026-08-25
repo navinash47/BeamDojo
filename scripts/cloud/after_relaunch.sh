@@ -123,6 +123,14 @@ if ! grep -q "def leftover_rigid_catcher" "$REPO/scripts/rsl_rl/beamdojo_runtime
   echo "beamdojo_runtime.py is missing leftover RigidObject catcher restore. Pull ${REF} or Stage 2 reset cannot index /World/catcher." >&2
   exit 1
 fi
+if ! grep -q "def leftover_wrong_robot_joint_key" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover H1/G1 joint-key drop. Pull ${REF} or leftover .*_hip_pitch dies at gym.make before W&B." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_wrong_robot_actuator" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover H1/G1 actuator drop. Pull ${REF} or leftover H1 legs ValueError on G1 at gym.make." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1

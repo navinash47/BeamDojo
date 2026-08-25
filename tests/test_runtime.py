@@ -1282,11 +1282,24 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
     def test_leftover_joint_name_helpers(self):
         self.assertTrue(self.rt.leftover_h1_joints_for_g1("torso"))
         self.assertTrue(self.rt.leftover_h1_joints_for_g1([".*_hip_yaw"]))
+        self.assertTrue(self.rt.leftover_h1_joints_for_g1(".*_hip_pitch"))
+        self.assertTrue(self.rt.leftover_h1_joints_for_g1(".*_knee"))
+        self.assertTrue(self.rt.leftover_h1_joints_for_g1(".*_shoulder_pitch"))
         self.assertTrue(self.rt.leftover_h1_torso_name("torso"))
         self.assertFalse(self.rt.leftover_h1_torso_name("torso_joint"))
         self.assertTrue(self.rt.leftover_g1_joints_for_h1("torso_joint"))
         self.assertTrue(self.rt.leftover_h1_bodies_for_g1(".*ankle_link"))
         self.assertFalse(self.rt.leftover_h1_joints_for_g1(".*_hip_yaw_joint"))
+        self.assertFalse(self.rt.leftover_h1_joints_for_g1(".*_shoulder_.*"))
+        self.assertTrue(self.rt.leftover_universal_joint_expr(".*"))
+        self.assertFalse(self.rt.leftover_h1_joint_name(".*"))
+        self.assertFalse(self.rt.leftover_g1_joint_name(".*"))
+        self.assertTrue(self.rt.leftover_h1_joint_name(".*_hip_pitch"))
+        self.assertTrue(self.rt.leftover_h1_joint_name("left_hip_pitch"))
+        self.assertFalse(self.rt.leftover_h1_joint_name(".*_hip_pitch_joint"))
+        self.assertTrue(self.rt.leftover_g1_joint_name(".*_hip_pitch_joint"))
+        self.assertTrue(self.rt.leftover_g1_joint_name("left_one_joint"))
+        self.assertFalse(self.rt.leftover_g1_joint_name(".*_hip_pitch"))
 
     def test_leftover_anymal_usd_is_restored_to_g1_minimal(self):
         robot = type(
@@ -1510,6 +1523,140 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertEqual(joint_pos.scale[".*_hip_yaw"], 0.25)
         self.assertNotIn(".*_calf_joint", robot.init_state.joint_pos)
         self.assertIsNone(policy.imu)
+
+    def test_leftover_h1_maps_on_g1_and_g1_maps_on_h1(self):
+        g1_usd = "/Isaac/Robots/Unitree/G1/g1_minimal.usd"
+        h1_usd = "/Isaac/Robots/Unitree/H1/h1_minimal.usd"
+        g1_robot = type(
+            "R",
+            (),
+            {
+                "usd_path": g1_usd,
+                "init_state": type(
+                    "S",
+                    (),
+                    {
+                        "pos": (0.0, 0.0, 0.74),
+                        "joint_pos": {
+                            ".*_hip_pitch": -0.28,
+                            ".*_knee": 0.79,
+                            "torso": 0.0,
+                            ".*_shoulder_pitch": 0.28,
+                            "left_hip_pitch_joint": -0.20,
+                            ".*": 0.0,
+                        },
+                    },
+                )(),
+                "actuators": {
+                    "legs": type(
+                        "A",
+                        (),
+                        {
+                            "joint_names_expr": [".*_hip_yaw", ".*_hip_pitch", ".*_knee", "torso"],
+                            "stiffness": {".*_hip_pitch": 200.0, "torso": 200.0},
+                        },
+                    )(),
+                    "all": type("A", (), {"joint_names_expr": [".*"], "stiffness": {".*": 40.0}})(),
+                },
+            },
+        )()
+        g1_joint_pos = type("J", (), {"scale": {".*_hip_pitch": 0.25, ".*": 0.25}, "offset": None})()
+        g1_cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": None, "robot": g1_robot},
+                )(),
+                "observations": None,
+                "actions": type("Act", (), {"joint_pos": g1_joint_pos})(),
+                "commands": None,
+                "sim": None,
+                "rewards": type("Rew", (), {"joint_deviation_fingers": None})(),
+            },
+        )()
+        self.assertTrue(self.rt.leftover_wrong_robot_joint_key(".*_hip_pitch", g1_cfg))
+        self.assertTrue(self.rt.leftover_wrong_robot_joint_key(".*_knee", g1_cfg))
+        self.assertTrue(self.rt.leftover_wrong_robot_joint_key("torso", g1_cfg))
+        self.assertFalse(self.rt.leftover_wrong_robot_joint_key(".*", g1_cfg))
+        self.assertFalse(self.rt.leftover_wrong_robot_joint_key("left_hip_pitch_joint", g1_cfg))
+        self.assertTrue(self.rt.leftover_wrong_robot_actuators(g1_cfg))
+        self.assertFalse(self.rt.leftover_wrong_robot_actuator(g1_robot.actuators["all"], g1_cfg))
+        self.rt.reassert_gpu_env_cfg(g1_cfg)
+        self.assertNotIn(".*_hip_pitch", g1_robot.init_state.joint_pos)
+        self.assertNotIn(".*_knee", g1_robot.init_state.joint_pos)
+        self.assertNotIn("torso", g1_robot.init_state.joint_pos)
+        self.assertNotIn(".*_shoulder_pitch", g1_robot.init_state.joint_pos)
+        self.assertEqual(g1_robot.init_state.joint_pos["left_hip_pitch_joint"], -0.20)
+        self.assertEqual(g1_robot.init_state.joint_pos[".*"], 0.0)
+        self.assertNotIn("legs", g1_robot.actuators)
+        self.assertIn("all", g1_robot.actuators)
+        self.assertNotIn(".*_hip_pitch", g1_joint_pos.scale)
+        self.assertEqual(g1_joint_pos.scale[".*"], 0.25)
+
+        h1_robot = type(
+            "R",
+            (),
+            {
+                "usd_path": h1_usd,
+                "init_state": type(
+                    "S",
+                    (),
+                    {
+                        "pos": (0.0, 0.0, 1.05),
+                        "joint_pos": {
+                            ".*_hip_pitch_joint": -0.20,
+                            "left_one_joint": 1.0,
+                            ".*_hip_pitch": -0.28,
+                            ".*": 0.0,
+                        },
+                    },
+                )(),
+                "actuators": {
+                    "legs": type(
+                        "A",
+                        (),
+                        {
+                            "joint_names_expr": [".*_hip_yaw", ".*_hip_pitch", ".*_knee", "torso"],
+                            "stiffness": {".*_hip_pitch": 200.0},
+                        },
+                    )(),
+                    "g1_legs": type("A", (), {"joint_names_expr": [".*_hip_pitch_joint", ".*_knee_joint"]})(),
+                },
+            },
+        )()
+        h1_joint_pos = type("J", (), {"scale": {".*_hip_pitch_joint": 0.25, ".*_hip_pitch": 0.25}, "offset": None})()
+        h1_cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": None, "robot": h1_robot},
+                )(),
+                "observations": None,
+                "actions": type("Act", (), {"joint_pos": h1_joint_pos})(),
+                "commands": None,
+                "sim": None,
+                "rewards": type("Rew", (), {"joint_deviation_fingers": None})(),
+            },
+        )()
+        self.assertTrue(self.rt.leftover_wrong_robot_joint_key(".*_hip_pitch_joint", h1_cfg))
+        self.assertFalse(self.rt.leftover_wrong_robot_joint_key(".*_hip_pitch", h1_cfg))
+        self.assertTrue(self.rt.leftover_wrong_robot_actuators(h1_cfg))
+        self.assertFalse(self.rt.leftover_wrong_robot_actuator(h1_robot.actuators["legs"], h1_cfg))
+        self.rt.reassert_gpu_env_cfg(h1_cfg)
+        self.assertNotIn(".*_hip_pitch_joint", h1_robot.init_state.joint_pos)
+        self.assertNotIn("left_one_joint", h1_robot.init_state.joint_pos)
+        self.assertEqual(h1_robot.init_state.joint_pos[".*_hip_pitch"], -0.28)
+        self.assertEqual(h1_robot.init_state.joint_pos[".*"], 0.0)
+        self.assertIn("legs", h1_robot.actuators)
+        self.assertNotIn("g1_legs", h1_robot.actuators)
+        self.assertNotIn(".*_hip_pitch_joint", h1_joint_pos.scale)
+        self.assertEqual(h1_joint_pos.scale[".*_hip_pitch"], 0.25)
 
     def test_env_cfg_stage_ignores_leftover_stage1_catcher(self):
         stage1 = type(
@@ -1753,6 +1900,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_quadruped_actuators", runtime)
         self.assertIn("def env_cfg_stage", runtime)
         self.assertIn("def leftover_rigid_catcher", runtime)
+        self.assertIn("def leftover_wrong_robot_joint_key", runtime)
+        self.assertIn("def leftover_wrong_robot_actuator", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -1811,6 +1960,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_quadruped_actuators", relaunch)
         self.assertIn("env_cfg_stage", relaunch)
         self.assertIn("leftover_rigid_catcher", relaunch)
+        self.assertIn("leftover_wrong_robot_joint_key", relaunch)
+        self.assertIn("leftover_wrong_robot_actuator", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)
