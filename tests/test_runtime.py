@@ -1398,6 +1398,9 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertTrue(self.rt.leftover_quadruped_joint_key(".*HAA"))
         self.assertTrue(self.rt.leftover_quadruped_joint_key("LF_HFE"))
         self.assertTrue(self.rt.leftover_quadruped_joint_key("FL_hip_joint"))
+        self.assertTrue(self.rt.leftover_quadruped_joint_key(".*_calf_joint"))
+        self.assertTrue(self.rt.leftover_quadruped_joint_key("F[L,R]_thigh_joint"))
+        self.assertTrue(self.rt.leftover_quadruped_joint_key(".*L_hip_joint"))
         self.assertFalse(self.rt.leftover_quadruped_joint_key(".*_hip_yaw"))
         self.assertFalse(self.rt.leftover_quadruped_joint_key("left_hip_yaw_joint"))
         state = type(
@@ -1451,6 +1454,62 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         )()
         self.rt.reassert_gpu_env_cfg(cfg)
         self.assertIsNone(critic.height_scan)
+
+    def test_leftover_go1_actuators_action_scale_and_imu_term(self):
+        actuators = {
+            "base_legs": type(
+                "A",
+                (),
+                {
+                    "network_file": "/Isaac/ActuatorNets/Unitree/unitree_go1.pt",
+                    "joint_names_expr": [".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
+                },
+            )()
+        }
+        spawn = type("Spawn", (), {"activate_contact_sensors": False})()
+        robot = type(
+            "R",
+            (),
+            {
+                "usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd",
+                "actuators": actuators,
+                "spawn": spawn,
+                "init_state": type("S", (), {"pos": (0.0, 0.0, 1.05), "joint_pos": {".*_calf_joint": -1.5}})(),
+            },
+        )()
+        joint_pos = type("J", (), {"scale": {".*HAA": 0.5, ".*_hip_yaw": 0.25}, "offset": None})()
+        imu = type(
+            "Term",
+            (),
+            {
+                "func": type("F", (), {"__name__": "imu_ang_vel"})(),
+                "params": {"sensor_cfg": {"name": "imu"}},
+            },
+        )()
+        policy = type("P", (), {"imu": imu, "height_scan": None})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": None, "robot": robot},
+                )(),
+                "observations": type("Obs", (), {"policy": policy})(),
+                "actions": type("Act", (), {"joint_pos": joint_pos})(),
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.assertTrue(self.rt.leftover_quadruped_actuators(cfg))
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertNotIn("base_legs", actuators)
+        self.assertTrue(spawn.activate_contact_sensors)
+        self.assertNotIn(".*HAA", joint_pos.scale)
+        self.assertEqual(joint_pos.scale[".*_hip_yaw"], 0.25)
+        self.assertNotIn(".*_calf_joint", robot.init_state.joint_pos)
+        self.assertIsNone(policy.imu)
 
     def test_leftover_quad_and_full_usd_helpers(self):
         anymal = type(
@@ -1603,6 +1662,7 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def _reassert_sim_timing", runtime)
         self.assertIn("def reassert_agent_cuda", runtime)
         self.assertIn("def leftover_quadruped_joint_key", runtime)
+        self.assertIn("def leftover_quadruped_actuators", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -1658,6 +1718,7 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("_ensure_train_cfg_sections", relaunch)
         self.assertIn("_reassert_sim_timing", relaunch)
         self.assertIn("leftover_quadruped_joint_key", relaunch)
+        self.assertIn("leftover_quadruped_actuators", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)

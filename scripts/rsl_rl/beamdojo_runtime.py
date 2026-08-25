@@ -558,14 +558,60 @@ def leftover_unusable_device(value) -> bool:
 
 
 def leftover_quadruped_joint_key(key) -> bool:
-    """ANYmal/Go2 leftover ``.*HAA`` / ``LF_HFE`` keys miss H1/G1 ``re.fullmatch``."""
+    """ANYmal/Go1/A1 leftover keys miss H1/G1 ``re.fullmatch`` at gym.make."""
     return bool(
         re.search(
-            r"(HAA|HFE|KFE|(?:^|[._*])(?:LF|RF|LH|RH|FL|FR|RL|RR)(?:[._*]|$))",
+            r"("
+            r"HAA|HFE|KFE|calf|thigh_joint|F\[L,R\]|R\[L,R\]|"
+            r"[LR]_hip_joint|"
+            r"(?:^|[._*])(?:LF|RF|LH|RH|FL|FR|RL|RR)(?:[._*]|$)"
+            r")",
             str(key),
             flags=re.IGNORECASE,
         )
     )
+
+
+def leftover_quadruped_actuator(actuator) -> bool:
+    """Go1 leftover ``network_file`` hits Nucleus; ANYmal ``.*HAA`` misses H1/G1."""
+    if actuator is None:
+        return False
+    network = (
+        actuator.get("network_file") if isinstance(actuator, dict) else getattr(actuator, "network_file", None)
+    )
+    if network:
+        return True
+    names = (
+        actuator.get("joint_names_expr")
+        if isinstance(actuator, dict)
+        else getattr(actuator, "joint_names_expr", None)
+    )
+    if any(leftover_quadruped_joint_key(item) for item in names_as_list(names)):
+        return True
+    for field in ("stiffness", "damping", "armature", "effort_limit", "velocity_limit"):
+        mapping = actuator.get(field) if isinstance(actuator, dict) else getattr(actuator, field, None)
+        if isinstance(mapping, dict) and any(leftover_quadruped_joint_key(key) for key in mapping):
+            return True
+    return False
+
+
+def leftover_quadruped_actuators(env_cfg) -> bool:
+    robot = getattr(getattr(env_cfg, "scene", None), "robot", None)
+    if robot is None:
+        return False
+    actuators = getattr(robot, "actuators", None)
+    if actuators is None and isinstance(robot, dict):
+        actuators = robot.get("actuators")
+    return any(leftover_quadruped_actuator(act) for _, act in _actuator_items(actuators))
+
+
+def _actuator_items(actuators):
+    if actuators is None:
+        return []
+    if isinstance(actuators, dict):
+        return list(actuators.items())
+    data = getattr(actuators, "__dict__", None) or {}
+    return [(key, value) for key, value in data.items() if not str(key).startswith("_")]
 
 
 def sanitize_clip_actions(value):
@@ -899,7 +945,11 @@ def _reassert_unitree_robot(env_cfg) -> None:
     """Leftover ANYmal / full H1 USD crashes or OOMs gym.make before wandb.init."""
     desired = desired_train_robot(env_cfg)
     kind = env_cfg_robot_kind(env_cfg)
-    need = leftover_quadruped_robot(env_cfg) or leftover_full_unitree_usd(env_cfg)
+    need = (
+        leftover_quadruped_robot(env_cfg)
+        or leftover_full_unitree_usd(env_cfg)
+        or leftover_quadruped_actuators(env_cfg)
+    )
     if desired and kind and desired != kind:
         need = True
     spec_name = desired or kind
@@ -925,6 +975,7 @@ def _reassert_unitree_robot(env_cfg) -> None:
     spec = G1 if spec_name == "g1" else H1
     _stamp_unitree_usd(env_cfg, spec_name)
     _set_init_pelvis_z(env_cfg, expected_pelvis_z(env_cfg, spec))
+    _drop_leftover_actuators(env_cfg)
 
 
 def _robot_init_state(env_cfg):
@@ -970,6 +1021,101 @@ def _reassert_init_joint_state(env_cfg) -> None:
         _set_joint_map(state, field, cleaned)
 
 
+def _robot_attr(env_cfg, name: str):
+    robot = getattr(getattr(env_cfg, "scene", None), "robot", None)
+    if robot is None:
+        return None
+    value = getattr(robot, name, None)
+    if value is None and isinstance(robot, dict):
+        value = robot.get(name)
+    return value
+
+
+def _drop_leftover_actuators(env_cfg) -> None:
+    """Isaac-free path: drop leftover Go1 nets / ANYmal actuator groups."""
+    actuators = _robot_attr(env_cfg, "actuators")
+    if actuators is None:
+        return
+    if isinstance(actuators, dict):
+        drop = [name for name, act in list(actuators.items()) if leftover_quadruped_actuator(act)]
+        for name in drop:
+            print(f"[WARN] Dropping leftover robot.actuators[{name!r}] (quad / Nucleus net).")
+            actuators.pop(name, None)
+        return
+    for name, act in _actuator_items(actuators):
+        if leftover_quadruped_actuator(act) and hasattr(actuators, name):
+            print(f"[WARN] Dropping leftover robot.actuators.{name} (quad / Nucleus net).")
+            setattr(actuators, name, None)
+
+
+def _reassert_action_joint_maps(env_cfg) -> None:
+    """Leftover ``scale={{'.*HAA': 0.5}}`` ValueErrors ActionManager at gym.make."""
+    joint_pos = getattr(getattr(env_cfg, "actions", None), "joint_pos", None)
+    if joint_pos is None:
+        return
+    for field in ("scale", "offset"):
+        value = joint_pos.get(field) if isinstance(joint_pos, dict) else getattr(joint_pos, field, None)
+        if not isinstance(value, dict):
+            continue
+        cleaned = {key: value[key] for key in value if not leftover_quadruped_joint_key(key)}
+        if len(cleaned) == len(value):
+            continue
+        print(f"[WARN] Dropping leftover actions.joint_pos.{field} quadruped keys.")
+        restored: dict | float | None = cleaned if cleaned else (0.25 if field == "scale" else None)
+        if isinstance(joint_pos, dict):
+            joint_pos[field] = restored
+        else:
+            setattr(joint_pos, field, restored)
+
+
+def _reassert_contact_sensors(env_cfg) -> None:
+    """Leftover ``activate_contact_sensors=False`` empties feet_air_time at first reset."""
+    robot = getattr(getattr(env_cfg, "scene", None), "robot", None)
+    spawn = getattr(robot, "spawn", None) if robot is not None else None
+    if spawn is None and isinstance(robot, dict):
+        spawn = robot.get("spawn")
+    if spawn is None:
+        return
+    flag = spawn.get("activate_contact_sensors") if isinstance(spawn, dict) else getattr(
+        spawn, "activate_contact_sensors", None
+    )
+    if flag is False:
+        print("[WARN] Enabling leftover activate_contact_sensors (feet_air_time at first reset).")
+        if isinstance(spawn, dict):
+            spawn["activate_contact_sensors"] = True
+        elif hasattr(spawn, "activate_contact_sensors"):
+            spawn.activate_contact_sensors = True
+
+
+def _scene_entity_names(env_cfg) -> set[str]:
+    names = {"robot", "contact_forces", "terrain"}
+    scene = getattr(env_cfg, "scene", None)
+    if scene is None:
+        return names
+    data = getattr(scene, "__dict__", None) or {}
+    for key, value in data.items():
+        if value is not None and not str(key).startswith("_"):
+            names.add(str(key))
+    for known in ("task_beam", "catcher", "sky_light"):
+        if getattr(scene, known, None) is not None:
+            names.add(known)
+    return names
+
+
+def leftover_missing_sensor_term(term, present: set[str]) -> bool:
+    """True when an obs term still looks up a sensor Hydra leftover never spawned."""
+    if term is None or parent_raycast_height_scan(term):
+        return False
+    params = getattr(term, "params", None)
+    sensor = None
+    if isinstance(params, dict):
+        sensor = params.get("sensor_cfg")
+    elif params is not None:
+        sensor = getattr(params, "sensor_cfg", None)
+    name = _sensor_cfg_name(sensor)
+    return bool(name) and name not in present
+
+
 def _range_pair_ok(value) -> bool:
     try:
         lo, hi = value[0], value[1]
@@ -1001,12 +1147,26 @@ def _reassert_velocity_ranges(env_cfg) -> None:
             setattr(ranges, key, default)
 
 
+def _public_field_names(obj) -> list[str]:
+    """Instance + class fields. ``type('X', (), {field: ...})`` stores on the class."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for source in (getattr(obj, "__dict__", None) or {}, getattr(type(obj), "__dict__", None) or {}):
+        for key in source:
+            if str(key).startswith("_") or key in seen:
+                continue
+            value = source[key]
+            if callable(value) and not isinstance(value, type):
+                continue
+            seen.add(key)
+            names.append(str(key))
+    return names
+
+
 def _iter_obs_groups(obs):
     if obs is None:
         return
-    names: list[str] = []
-    data = getattr(obs, "__dict__", None) or {}
-    names.extend(key for key in data if not str(key).startswith("_"))
+    names = _public_field_names(obs)
     for known in ("policy", "critic", "teacher", "privileged", "rnd_state"):
         if known not in names and hasattr(obs, known):
             names.append(known)
@@ -1027,11 +1187,7 @@ def _iter_obs_terms(group):
     if isinstance(group, dict):
         yield from group.items()
         return
-    data = getattr(group, "__dict__", None) or {}
-    keys = [key for key in data if not str(key).startswith("_")]
-    if "height_scan" not in keys and hasattr(group, "height_scan"):
-        keys.append("height_scan")
-    for key in keys:
+    for key in _public_field_names(group):
         yield key, getattr(group, key, None)
 
 
@@ -1052,6 +1208,16 @@ def _reassert_obs_height_scan(env_cfg) -> None:
                 _install_task_height_scan(group)
                 continue
             print(f"[WARN] Clearing leftover observations.{group_name}.{term_name} (height_scanner).")
+            if isinstance(group, dict):
+                group[term_name] = None
+            else:
+                setattr(group, term_name, None)
+    present = _scene_entity_names(env_cfg)
+    for group_name, group in _iter_obs_groups(obs):
+        for term_name, term in _iter_obs_terms(group):
+            if not leftover_missing_sensor_term(term, present):
+                continue
+            print(f"[WARN] Clearing leftover observations.{group_name}.{term_name} (missing sensor).")
             if isinstance(group, dict):
                 group[term_name] = None
             else:
@@ -1509,7 +1675,10 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
         curriculum.terrain_levels = None
 
     _reassert_unitree_robot(env_cfg)
+    _drop_leftover_actuators(env_cfg)
     _reassert_init_joint_state(env_cfg)
+    _reassert_action_joint_maps(env_cfg)
+    _reassert_contact_sensors(env_cfg)
     _reassert_velocity_ranges(env_cfg)
     _reassert_anymal_body_names(env_cfg)
     _reassert_g1_action_joints(env_cfg)

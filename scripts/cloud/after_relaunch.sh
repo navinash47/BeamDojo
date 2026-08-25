@@ -111,6 +111,10 @@ if ! grep -q "def leftover_quadruped_joint_key" "$REPO/scripts/rsl_rl/beamdojo_r
   echo "beamdojo_runtime.py is missing leftover ANYmal joint-key drop. Pull ${REF} or leftover .*HAA dies at gym.make." >&2
   exit 1
 fi
+if ! grep -q "def leftover_quadruped_actuators" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover Go1/ANYmal actuator drop. Pull ${REF} or a Nucleus actuator net hangs gym.make." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1
