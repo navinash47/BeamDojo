@@ -341,6 +341,43 @@ def leftover_full_unitree_usd(env_cfg) -> bool:
     return bool(re.search(r"(?:^|[^a-z0-9])(h1|g1)(?:[^a-z0-9]|$)", blob))
 
 
+def env_cfg_stage(env_cfg) -> int | None:
+    """Stage from the env class. Leftover ``catcher`` is not the source of truth.
+
+    Hydra can dump a Stage 2 catcher onto Stage 1 (then timeout-only is skipped and
+    leftover ``base_contact`` fires on the plane at the first reset) or drop the
+    catcher from Stage 2 (``RigidObject.reset`` / infinite fall before W&B).
+    """
+    name = type(env_cfg).__name__.lower()
+    if re.search(r"stage[_]?2", name):
+        return 2
+    if re.search(r"stage[_]?1", name):
+        return 1
+    scene = getattr(env_cfg, "scene", None)
+    if _scene_uses_stones(scene):
+        return 2
+    if getattr(scene, "catcher", None) is not None:
+        return 2
+    return None
+
+
+def leftover_rigid_catcher(catcher) -> bool:
+    """``InteractiveScene.reset`` cannot index a world ``/World/catcher`` RigidObject."""
+    if catcher is None:
+        return False
+    return "RigidObject" in type(catcher).__name__
+
+
+def leftover_uncloned_prim_path(path) -> bool:
+    """Cloned 1024-env assets must use ``{ENV_REGEX_NS}`` or gym.make dies."""
+    if path is None:
+        return False
+    text = str(path).strip()
+    if not text:
+        return False
+    return "{ENV_REGEX_NS}" not in text and "{ENV_NS}" not in text
+
+
 def desired_train_robot(env_cfg) -> str | None:
     """``g1`` / ``h1`` from the env class, else USD / leftover fingers."""
     name = type(env_cfg).__name__.lower()
@@ -895,7 +932,7 @@ def _reassert_physx_floors(env_cfg) -> None:
 
 
 def expected_pelvis_z(env_cfg, spec) -> float:
-    if getattr(getattr(env_cfg, "scene", None), "catcher", None) is not None:
+    if env_cfg_stage(env_cfg) == 2:
         return float(spec.pelvis_z) + BEAM_TOP_Z
     return float(spec.pelvis_z)
 
@@ -965,7 +1002,7 @@ def _reassert_unitree_robot(env_cfg) -> None:
 
         spec = G1 if spec_name == "g1" else H1
         spawn_robot(env_cfg, spec)
-        if getattr(getattr(env_cfg, "scene", None), "catcher", None) is None:
+        if env_cfg_stage(env_cfg) != 2:
             env_cfg.scene.robot.init_state.pos = (0.0, 0.0, spec.pelvis_z)
         return
     except ImportError:
@@ -1128,9 +1165,19 @@ def _reassert_velocity_ranges(env_cfg) -> None:
     """Leftover ``ranges.lin_vel_x=None`` TypeErrors UniformVelocityCommand at gym.make."""
     cmd = getattr(getattr(env_cfg, "commands", None), "base_velocity", None)
     ranges = getattr(cmd, "ranges", None) if cmd is not None else None
+    if cmd is not None and (
+        hasattr(cmd, "resampling_time_range") or (isinstance(cmd, dict) and "resampling_time_range" in cmd)
+    ):
+        raw = cmd.get("resampling_time_range") if isinstance(cmd, dict) else getattr(cmd, "resampling_time_range", None)
+        if not _range_pair_ok(raw):
+            print(f"[WARN] Restoring leftover commands.base_velocity.resampling_time_range={raw!r}.")
+            if isinstance(cmd, dict):
+                cmd["resampling_time_range"] = (10.0, 10.0)
+            else:
+                cmd.resampling_time_range = (10.0, 10.0)
     if ranges is None:
         return
-    stage2 = getattr(getattr(env_cfg, "scene", None), "catcher", None) is not None
+    stage2 = env_cfg_stage(env_cfg) == 2
     defaults = {
         "lin_vel_x": (0.2, 0.8) if stage2 else (-1.0, 1.0),
         "lin_vel_y": (-0.15, 0.15) if stage2 else (-1.0, 1.0),
@@ -1315,9 +1362,67 @@ def _reassert_sim_timing(env_cfg) -> None:
             sim.render_interval = dec_n
 
 
+def _world_catcher_stub():
+    return type("AssetBaseCfg", (), {"prim_path": "/World/catcher", "collision_group": -1})()
+
+
+def _reassert_stage_catcher(env_cfg) -> None:
+    """Leftover Stage 1 catcher / Stage 2 RigidObject catcher dies at first reset."""
+    scene = getattr(env_cfg, "scene", None)
+    if scene is None:
+        return
+    stage = env_cfg_stage(env_cfg)
+    catcher = getattr(scene, "catcher", None)
+    if stage == 1 and catcher is not None:
+        print("[WARN] Clearing leftover scene.catcher (Stage 1 is plane / timeout-only).")
+        scene.catcher = None
+        return
+    if stage != 2:
+        return
+    if leftover_rigid_catcher(catcher) or catcher is None:
+        print("[WARN] Restoring leftover Stage 2 catcher to world AssetBaseCfg.")
+        try:
+            from h1_cfg.scene_props import catcher_cfg
+
+            scene.catcher = catcher_cfg()
+        except ImportError:
+            scene.catcher = _world_catcher_stub()
+
+
+def _reassert_clone_prim_paths(env_cfg) -> None:
+    """Leftover ``/World/Robot`` (no ENV_REGEX_NS) cannot clone 1024 envs."""
+    scene = getattr(env_cfg, "scene", None)
+    if scene is None:
+        return
+    robot = getattr(scene, "robot", None)
+    path = getattr(robot, "prim_path", None) if robot is not None else None
+    if robot is not None and leftover_uncloned_prim_path(path):
+        print(f"[WARN] Restoring leftover robot.prim_path={path!r} to {{ENV_REGEX_NS}}/Robot.")
+        if isinstance(robot, dict):
+            robot["prim_path"] = "{ENV_REGEX_NS}/Robot"
+        else:
+            robot.prim_path = "{ENV_REGEX_NS}/Robot"
+    contact = getattr(scene, "contact_forces", None)
+    cpath = getattr(contact, "prim_path", None) if contact is not None else None
+    if contact is not None and leftover_uncloned_prim_path(cpath):
+        print("[WARN] Restoring leftover contact_forces.prim_path to {ENV_REGEX_NS}/Robot/.*")
+        if isinstance(contact, dict):
+            contact["prim_path"] = "{ENV_REGEX_NS}/Robot/.*"
+        else:
+            contact.prim_path = "{ENV_REGEX_NS}/Robot/.*"
+    beam = getattr(scene, "task_beam", None)
+    bpath = getattr(beam, "prim_path", None) if beam is not None else None
+    if beam is not None and leftover_uncloned_prim_path(bpath):
+        print("[WARN] Restoring leftover task_beam.prim_path to {ENV_REGEX_NS}/TaskBeam.")
+        if isinstance(beam, dict):
+            beam["prim_path"] = "{ENV_REGEX_NS}/TaskBeam"
+        else:
+            beam.prim_path = "{ENV_REGEX_NS}/TaskBeam"
+
+
 def _reassert_stage1_timeout_only(env_cfg) -> None:
     """Stage 1 is timeout-only. Leftover parent base_contact fires on the plane."""
-    if getattr(getattr(env_cfg, "scene", None), "catcher", None) is not None:
+    if env_cfg_stage(env_cfg) == 2:
         return
     terms = getattr(env_cfg, "terminations", None)
     if terms is None:
@@ -1535,8 +1640,10 @@ def _reassert_infinite_horizon(env_cfg) -> None:
 
 def _reassert_stage2_reset_on_beam(env_cfg) -> None:
     """Parent leftover ``y=(-0.5, 0.5)`` / ``yaw=±π`` spawns beside a 20 cm beam."""
+    if env_cfg_stage(env_cfg) != 2:
+        return
     scene = getattr(env_cfg, "scene", None)
-    if scene is None or getattr(scene, "catcher", None) is None:
+    if scene is None:
         return
     events = getattr(env_cfg, "events", None)
     reset_base = getattr(events, "reset_base", None)
@@ -1593,8 +1700,7 @@ def _reassert_anymal_body_names(env_cfg) -> None:
         contact = getattr(terms, "base_contact", None)
         entity = _term_entity_cfg(contact, "sensor_cfg")
         if anymal_parent_body_names(_entity_body_names(entity)):
-            scene = getattr(env_cfg, "scene", None)
-            if scene is not None and getattr(scene, "catcher", None) is not None:
+            if env_cfg_stage(env_cfg) == 2:
                 print("[WARN] Retargeting leftover terminations.base_contact from 'base' to torso_link.")
                 _set_entity_body_names(entity, "torso_link")
             else:
@@ -1674,6 +1780,8 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
         print("[WARN] Clearing leftover curriculum.terrain_levels (plane has no generator).")
         curriculum.terrain_levels = None
 
+    _reassert_stage_catcher(env_cfg)
+    _reassert_clone_prim_paths(env_cfg)
     _reassert_unitree_robot(env_cfg)
     _drop_leftover_actuators(env_cfg)
     _reassert_init_joint_state(env_cfg)

@@ -1511,6 +1511,94 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertNotIn(".*_calf_joint", robot.init_state.joint_pos)
         self.assertIsNone(policy.imu)
 
+    def test_env_cfg_stage_ignores_leftover_stage1_catcher(self):
+        stage1 = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {"scene": type("S", (), {"catcher": object(), "task_stone_0": None})()},
+        )()
+        stage2 = type("BeamDojoStage2EnvCfg", (), {"scene": type("S", (), {"catcher": None})()})()
+        unnamed = type("Cfg", (), {"scene": type("S", (), {"catcher": object()})()})()
+        self.assertEqual(self.rt.env_cfg_stage(stage1), 1)
+        self.assertEqual(self.rt.env_cfg_stage(stage2), 2)
+        self.assertEqual(self.rt.env_cfg_stage(unnamed), 2)
+        self.assertTrue(self.rt.leftover_rigid_catcher(type("RigidObjectCfg", (), {})()))
+        self.assertFalse(self.rt.leftover_rigid_catcher(object()))
+        self.assertTrue(self.rt.leftover_uncloned_prim_path("/World/Robot"))
+        self.assertFalse(self.rt.leftover_uncloned_prim_path("{ENV_REGEX_NS}/Robot"))
+
+    def test_leftover_stage_catcher_and_uncloned_prims(self):
+        robot = type("R", (), {"prim_path": "/World/Robot", "usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})()
+        contact = type("C", (), {"prim_path": "/World/Robot/.*", "history_length": 3, "track_air_time": True})()
+        beam = type("B", (), {"prim_path": "/World/TaskBeam"})()
+        terms = type("Term", (), {"base_contact": object(), "base_height": object()})()
+        stage1 = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": object(),
+                        "robot": robot,
+                        "contact_forces": contact,
+                        "task_beam": beam,
+                    },
+                )(),
+                "observations": None,
+                "commands": type(
+                    "Cmd",
+                    (),
+                    {"base_velocity": type("V", (), {"resampling_time_range": None, "ranges": None})()},
+                )(),
+                "sim": None,
+                "terminations": terms,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(stage1)
+        self.assertIsNone(stage1.scene.catcher)
+        self.assertIsNone(terms.base_contact)
+        self.assertEqual(robot.prim_path, "{ENV_REGEX_NS}/Robot")
+        self.assertEqual(contact.prim_path, "{ENV_REGEX_NS}/Robot/.*")
+        self.assertEqual(beam.prim_path, "{ENV_REGEX_NS}/TaskBeam")
+        self.assertEqual(stage1.commands.base_velocity.resampling_time_range, (10.0, 10.0))
+
+        rigid = type("RigidObjectCfg", (), {"prim_path": "/World/catcher"})()
+        stage2 = type(
+            "BeamDojoStage2EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": rigid, "robot": None},
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(stage2)
+        self.assertFalse(self.rt.leftover_rigid_catcher(stage2.scene.catcher))
+        self.assertEqual(getattr(stage2.scene.catcher, "prim_path", None), "/World/catcher")
+
+        missing = type(
+            "BeamDojoStage2EnvCfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(missing)
+        self.assertIsNotNone(missing.scene.catcher)
+        self.assertEqual(missing.scene.catcher.prim_path, "/World/catcher")
+
     def test_leftover_quad_and_full_usd_helpers(self):
         anymal = type(
             "Cfg",
@@ -1663,6 +1751,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def reassert_agent_cuda", runtime)
         self.assertIn("def leftover_quadruped_joint_key", runtime)
         self.assertIn("def leftover_quadruped_actuators", runtime)
+        self.assertIn("def env_cfg_stage", runtime)
+        self.assertIn("def leftover_rigid_catcher", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -1719,6 +1809,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("_reassert_sim_timing", relaunch)
         self.assertIn("leftover_quadruped_joint_key", relaunch)
         self.assertIn("leftover_quadruped_actuators", relaunch)
+        self.assertIn("env_cfg_stage", relaunch)
+        self.assertIn("leftover_rigid_catcher", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)

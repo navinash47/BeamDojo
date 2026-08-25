@@ -115,6 +115,14 @@ if ! grep -q "def leftover_quadruped_actuators" "$REPO/scripts/rsl_rl/beamdojo_r
   echo "beamdojo_runtime.py is missing leftover Go1/ANYmal actuator drop. Pull ${REF} or a Nucleus actuator net hangs gym.make." >&2
   exit 1
 fi
+if ! grep -q "def env_cfg_stage" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing env_cfg_stage. Pull ${REF} or a leftover Stage 1 catcher skips timeout-only and dies at first reset." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_rigid_catcher" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover RigidObject catcher restore. Pull ${REF} or Stage 2 reset cannot index /World/catcher." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1
