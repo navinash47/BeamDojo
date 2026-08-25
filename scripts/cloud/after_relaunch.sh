@@ -171,6 +171,18 @@ if ! grep -q "def leftover_wrong_action_joint_names" "$REPO/scripts/rsl_rl/beamd
   echo "beamdojo_runtime.py is missing leftover ANYmal action-joint restore. Pull ${REF} or .*HAA resolves 0 actions at gym.make." >&2
   exit 1
 fi
+if ! grep -q "def leftover_excess_num_envs" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover 4096-env clamp. Pull ${REF} or parent num_envs=4096 OOMs the A10 before W&B." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_clone_in_fabric" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover clone_in_fabric drop. Pull ${REF} or Fabric hides Stage 2 USD prims at first reset." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_missing_robot" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover null-robot restore. Pull ${REF} or Hydra scene.robot=None dies at gym.make." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1

@@ -1733,6 +1733,17 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertTrue(self.rt.leftover_invalid_env_spacing(type("S", (), {"env_spacing": None})()))
         self.assertTrue(self.rt.leftover_invalid_env_spacing(type("S", (), {"env_spacing": 2.5})()))
         self.assertFalse(self.rt.leftover_invalid_env_spacing(type("S", (), {"env_spacing": 6.0})()))
+        self.assertTrue(self.rt.leftover_excess_num_envs(type("S", (), {"num_envs": 4096})()))
+        self.assertFalse(self.rt.leftover_excess_num_envs(type("S", (), {"num_envs": 1024})()))
+        self.assertFalse(self.rt.leftover_excess_num_envs(type("S", (), {"num_envs": 64})()))
+        self.assertTrue(self.rt.leftover_clone_in_fabric(type("S", (), {"clone_in_fabric": True})()))
+        self.assertFalse(self.rt.leftover_clone_in_fabric(type("S", (), {"clone_in_fabric": False})()))
+        self.assertTrue(self.rt.leftover_stage_in_memory(type("Sim", (), {"create_stage_in_memory": True})()))
+        empty_scene = type("S", (), {"robot": None, "terrain": None, "contact_forces": None})()
+        self.assertTrue(self.rt.leftover_missing_robot(empty_scene))
+        self.assertTrue(self.rt.leftover_missing_terrain(empty_scene))
+        self.assertTrue(self.rt.leftover_missing_contact_forces(empty_scene))
+        self.assertNotIn("contact_forces", self.rt._scene_entity_names(type("C", (), {"scene": empty_scene})()))
         h1_act = type(
             "BeamDojoStage1EnvCfg",
             (),
@@ -2123,6 +2134,40 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.rt.reassert_gpu_env_cfg(g1_cfg)
         self.assertEqual(g1_joint_pos.joint_names, list(G1.action_joints))
 
+        missing = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": None,
+                        "contact_forces": None,
+                        "num_envs": 4096,
+                        "clone_in_fabric": True,
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": type("Sim", (), {"create_stage_in_memory": True})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(missing)
+        self.assertEqual(missing.scene.num_envs, 1024)
+        self.assertFalse(missing.scene.clone_in_fabric)
+        self.assertFalse(missing.sim.create_stage_in_memory)
+        self.assertIsNotNone(missing.scene.robot)
+        self.assertIn("h1_minimal.usd", str(getattr(missing.scene.robot, "usd_path", "")))
+        self.assertIsNotNone(missing.scene.terrain)
+        self.assertEqual(getattr(missing.scene.terrain, "terrain_type", None), "plane")
+        self.assertIsNotNone(missing.scene.contact_forces)
+        self.assertEqual(missing.scene.contact_forces.prim_path, "{ENV_REGEX_NS}/Robot/.*")
+        self.assertEqual(missing.scene.contact_forces.history_length, 3)
+
     def test_leftover_quad_and_full_usd_helpers(self):
         anymal = type(
             "Cfg",
@@ -2198,7 +2243,7 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         )()
         self.rt.reassert_gpu_env_cfg(cfg)
         self.assertIsNone(cfg.rewards.undesired_contacts)
-        self.assertEqual(sensor.body_names, ".*ankle.*")
+        self.assertEqual(sensor.body_names, ".*_ankle_link")
         self.assertIsNone(cfg.events.base_external_force_torque)
         self.assertEqual(cfg.events.add_base_mass.params["asset_cfg"].body_names, "torso_link")
         self.assertIsNone(cfg.terminations.base_contact)
@@ -2289,6 +2334,9 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_contact_filter_prims", runtime)
         self.assertIn("def leftover_wrong_contact_prim", runtime)
         self.assertIn("def leftover_wrong_action_joint_names", runtime)
+        self.assertIn("def leftover_excess_num_envs", runtime)
+        self.assertIn("def leftover_clone_in_fabric", runtime)
+        self.assertIn("def leftover_missing_robot", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -2359,6 +2407,9 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_contact_filter_prims", relaunch)
         self.assertIn("leftover_wrong_contact_prim", relaunch)
         self.assertIn("leftover_wrong_action_joint_names", relaunch)
+        self.assertIn("leftover_excess_num_envs", relaunch)
+        self.assertIn("leftover_clone_in_fabric", relaunch)
+        self.assertIn("leftover_missing_robot", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)

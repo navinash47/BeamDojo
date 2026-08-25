@@ -617,6 +617,42 @@ def leftover_zero_num_envs(scene) -> bool:
         return True
 
 
+def leftover_excess_num_envs(scene) -> bool:
+    """Parent locomotion leftover ``4096`` OOMs A10 24GB at gym.make. Play 64 stays."""
+    if scene is None or not hasattr(scene, "num_envs"):
+        return False
+    try:
+        return int(scene.num_envs) > 1024
+    except (TypeError, ValueError):
+        return False
+
+
+def leftover_clone_in_fabric(scene) -> bool:
+    """Isaac 2.3.2 leftover Fabric clone hides USD prims Stage 2 reset writes before W&B."""
+    if scene is None:
+        return False
+    return getattr(scene, "clone_in_fabric", None) is True
+
+
+def leftover_stage_in_memory(sim) -> bool:
+    """Leftover ``create_stage_in_memory`` cannot pair with cameras / Fabric and dies at gym.make."""
+    if sim is None:
+        return False
+    return getattr(sim, "create_stage_in_memory", None) is True
+
+
+def leftover_missing_robot(scene) -> bool:
+    return scene is not None and getattr(scene, "robot", None) is None
+
+
+def leftover_missing_terrain(scene) -> bool:
+    return scene is not None and getattr(scene, "terrain", None) is None
+
+
+def leftover_missing_contact_forces(scene) -> bool:
+    return scene is not None and getattr(scene, "contact_forces", None) is None
+
+
 def leftover_invalid_env_spacing(scene) -> bool:
     """``None`` / parent ``2.5`` overlaps 1024 H1s at gym.make. Play ``6.0`` stays."""
     if scene is None or not hasattr(scene, "env_spacing"):
@@ -1417,7 +1453,8 @@ def _reassert_unitree_robot(env_cfg) -> None:
     desired = desired_train_robot(env_cfg)
     kind = env_cfg_robot_kind(env_cfg)
     need = (
-        leftover_quadruped_robot(env_cfg)
+        leftover_missing_robot(getattr(env_cfg, "scene", None))
+        or leftover_quadruped_robot(env_cfg)
         or leftover_full_unitree_usd(env_cfg)
         or leftover_quadruped_actuators(env_cfg)
         or leftover_wrong_robot_actuators(env_cfg)
@@ -1566,14 +1603,14 @@ def _reassert_contact_sensors(env_cfg) -> None:
 
 
 def _scene_entity_names(env_cfg) -> set[str]:
-    names = {"robot", "contact_forces", "terrain"}
+    names: set[str] = set()
     scene = getattr(env_cfg, "scene", None)
     if scene is None:
         return names
     for key in _public_field_names(scene):
         if getattr(scene, key, None) is not None:
             names.add(str(key))
-    for known in ("task_beam", "catcher", "sky_light"):
+    for known in ("robot", "contact_forces", "terrain", "task_beam", "catcher", "sky_light"):
         if getattr(scene, known, None) is not None:
             names.add(known)
     return names
@@ -1952,12 +1989,75 @@ def _reassert_filter_collisions(env_cfg) -> None:
     scene.filter_collisions = True
 
 
+def _reassert_clone_in_fabric(env_cfg) -> None:
+    scene = getattr(env_cfg, "scene", None)
+    if not leftover_clone_in_fabric(scene):
+        return
+    print("[WARN] Disabling leftover scene.clone_in_fabric (USD Stage 2 prim writes at first reset).")
+    scene.clone_in_fabric = False
+
+
+def _reassert_stage_in_memory(env_cfg) -> None:
+    sim = getattr(env_cfg, "sim", None)
+    if not leftover_stage_in_memory(sim):
+        return
+    print("[WARN] Disabling leftover sim.create_stage_in_memory (Isaac 2.3.2 gym.make).")
+    sim.create_stage_in_memory = False
+
+
+def _plane_terrain_stub():
+    return type("TerrainImporterCfg", (), {"prim_path": "/World/ground", "terrain_type": "plane"})()
+
+
+def _contact_forces_stub():
+    return type(
+        "ContactSensorCfg",
+        (),
+        {
+            "prim_path": "{ENV_REGEX_NS}/Robot/.*",
+            "history_length": 3,
+            "track_air_time": True,
+        },
+    )()
+
+
+def _reassert_missing_scene_assets(env_cfg) -> None:
+    """Hydra leftover can null terrain / contact_forces; gym.make KeyErrors before W&B."""
+    scene = getattr(env_cfg, "scene", None)
+    if scene is None:
+        return
+    if leftover_missing_terrain(scene):
+        print("[WARN] Restoring leftover scene.terrain to a plane.")
+        try:
+            from h1_cfg.beamdojo_common import flat_plane_terrain
+
+            flat_plane_terrain(env_cfg)
+        except ImportError:
+            scene.terrain = _plane_terrain_stub()
+    if leftover_missing_contact_forces(scene):
+        print("[WARN] Restoring leftover scene.contact_forces (feet_air_time at first reset).")
+        try:
+            from isaaclab.sensors import ContactSensorCfg
+
+            scene.contact_forces = ContactSensorCfg(
+                prim_path="{ENV_REGEX_NS}/Robot/.*",
+                history_length=3,
+                track_air_time=True,
+                update_period=0.0,
+            )
+        except ImportError:
+            scene.contact_forces = _contact_forces_stub()
+
+
 def _reassert_num_envs(env_cfg) -> None:
     scene = getattr(env_cfg, "scene", None)
-    if not leftover_zero_num_envs(scene):
+    if leftover_zero_num_envs(scene):
+        print("[WARN] Restoring leftover scene.num_envs=1024.")
+        scene.num_envs = 1024
         return
-    print("[WARN] Restoring leftover scene.num_envs=1024.")
-    scene.num_envs = 1024
+    if leftover_excess_num_envs(scene):
+        print("[WARN] Clamping leftover scene.num_envs to 1024 (parent 4096 OOMs A10 24GB).")
+        scene.num_envs = 1024
 
 
 def _enable_spawn_collision(asset) -> None:
@@ -2408,6 +2508,9 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     _reassert_drop_scene_cameras(env_cfg)
     _reassert_filter_collisions(env_cfg)
     _reassert_num_envs(env_cfg)
+    _reassert_clone_in_fabric(env_cfg)
+    _reassert_stage_in_memory(env_cfg)
+    _reassert_missing_scene_assets(env_cfg)
 
     terrain = getattr(scene, "terrain", None) if scene is not None else None
     if terrain is not None:
