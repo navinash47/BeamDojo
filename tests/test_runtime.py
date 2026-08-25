@@ -1744,6 +1744,29 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertTrue(self.rt.leftover_missing_terrain(empty_scene))
         self.assertTrue(self.rt.leftover_missing_contact_forces(empty_scene))
         self.assertNotIn("contact_forces", self.rt._scene_entity_names(type("C", (), {"scene": empty_scene})()))
+        self.assertTrue(self.rt.leftover_invalid_command_frac(None))
+        self.assertTrue(self.rt.leftover_invalid_command_frac(1.5))
+        self.assertTrue(self.rt.leftover_invalid_command_frac(float("nan")))
+        self.assertFalse(self.rt.leftover_invalid_command_frac(0.5))
+        self.assertTrue(self.rt.leftover_wrong_scene_asset_name(None))
+        self.assertTrue(self.rt.leftover_wrong_scene_asset_name(""))
+        self.assertTrue(self.rt.leftover_wrong_scene_asset_name("anymal"))
+        self.assertFalse(self.rt.leftover_wrong_scene_asset_name("robot"))
+        missing_cmd = type("C", (), {"commands": None, "actions": None})()
+        self.assertTrue(self.rt.leftover_missing_base_velocity(missing_cmd))
+        self.assertTrue(self.rt.leftover_missing_joint_pos_action(missing_cmd))
+        self.assertFalse(
+            self.rt.leftover_missing_base_velocity(
+                type("C", (), {"commands": type("Cmd", (), {"base_velocity": object()})()})()
+            )
+        )
+        self.assertTrue(self.rt.leftover_invalid_rel_frac(type("V", (), {})(), "rel_standing_envs"))
+        self.assertTrue(self.rt.leftover_invalid_rel_frac(type("V", (), {"rel_heading_envs": None})(), "rel_heading_envs"))
+        self.assertFalse(self.rt.leftover_invalid_rel_frac(type("V", (), {"rel_standing_envs": 0.5})(), "rel_standing_envs"))
+        self.assertTrue(self.rt.leftover_missing_class_type(type("T", (), {"class_type": None})()))
+        self.assertFalse(self.rt.leftover_missing_class_type(type("T", (), {"class_type": object})()))
+        self.assertTrue(self.rt.leftover_wait_for_textures(type("Sim", (), {"wait_for_textures": True})()))
+        self.assertFalse(self.rt.leftover_wait_for_textures(type("Sim", (), {"wait_for_textures": False})()))
         h1_act = type(
             "BeamDojoStage1EnvCfg",
             (),
@@ -2168,6 +2191,112 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertEqual(missing.scene.contact_forces.prim_path, "{ENV_REGEX_NS}/Robot/.*")
         self.assertEqual(missing.scene.contact_forces.history_length, 3)
 
+    def test_leftover_velocity_command_and_joint_pos_are_restored(self):
+        from h1_cfg.robot_spec import G1
+
+        cmd = type(
+            "V",
+            (),
+            {
+                "rel_standing_envs": None,
+                "rel_heading_envs": float("nan"),
+                "asset_name": "anymal",
+                "class_type": None,
+                "heading_command": True,
+                "ranges": type("R", (), {"heading": None})(),
+            },
+        )()
+        sim = type("Sim", (), {"wait_for_textures": True, "dt": 0.005, "device": "cuda:0", "render_interval": 4})()
+        stage2 = type(
+            "BeamDojoStage2EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})(),
+                    },
+                )(),
+                "observations": None,
+                "commands": type("Cmd", (), {"base_velocity": cmd})(),
+                "actions": type("A", (), {"joint_pos": type("J", (), {"asset_name": "Robot", "joint_names": [".*"]})()})(),
+                "sim": sim,
+                "decimation": 4,
+                "episode_length_s": 20,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(stage2)
+        self.assertEqual(cmd.rel_standing_envs, 0.1)
+        self.assertEqual(cmd.rel_heading_envs, 0.0)
+        self.assertEqual(cmd.asset_name, "robot")
+        self.assertFalse(cmd.heading_command)
+        self.assertFalse(cmd.debug_vis)
+        self.assertIsNotNone(cmd.class_type)
+        self.assertEqual(stage2.actions.joint_pos.asset_name, "robot")
+        self.assertIsNotNone(stage2.actions.joint_pos.class_type)
+        self.assertFalse(sim.wait_for_textures)
+
+        missing = type(
+            "BeamDojoStage1G1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/G1/g1_minimal.usd"})(),
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "actions": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(missing)
+        self.assertIsNotNone(missing.commands.base_velocity)
+        self.assertEqual(missing.commands.base_velocity.rel_standing_envs, 0.5)
+        self.assertEqual(missing.commands.base_velocity.rel_heading_envs, 0.0)
+        self.assertEqual(missing.commands.base_velocity.asset_name, "robot")
+        self.assertFalse(missing.commands.base_velocity.heading_command)
+        self.assertIsNotNone(missing.actions.joint_pos)
+        self.assertEqual(missing.actions.joint_pos.joint_names, list(G1.action_joints))
+        self.assertEqual(missing.actions.joint_pos.asset_name, "robot")
+        self.assertEqual(missing.actions.joint_pos.scale, 0.25)
+
+        nulled_joint = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})(),
+                    },
+                )(),
+                "observations": None,
+                "commands": type("Cmd", (), {"base_velocity": None})(),
+                "actions": type("A", (), {"joint_pos": None})(),
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(nulled_joint)
+        self.assertIsNotNone(nulled_joint.commands.base_velocity)
+        self.assertEqual(nulled_joint.commands.base_velocity.rel_standing_envs, 0.5)
+        self.assertIsNotNone(nulled_joint.actions.joint_pos)
+        self.assertEqual(nulled_joint.actions.joint_pos.joint_names, [".*"])
+
     def test_leftover_quad_and_full_usd_helpers(self):
         anymal = type(
             "Cfg",
@@ -2337,6 +2466,11 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_excess_num_envs", runtime)
         self.assertIn("def leftover_clone_in_fabric", runtime)
         self.assertIn("def leftover_missing_robot", runtime)
+        self.assertIn("def leftover_invalid_command_frac", runtime)
+        self.assertIn("def leftover_missing_base_velocity", runtime)
+        self.assertIn("def leftover_missing_joint_pos_action", runtime)
+        self.assertIn("def leftover_missing_class_type", runtime)
+        self.assertIn("def leftover_wait_for_textures", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -2410,6 +2544,11 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_excess_num_envs", relaunch)
         self.assertIn("leftover_clone_in_fabric", relaunch)
         self.assertIn("leftover_missing_robot", relaunch)
+        self.assertIn("leftover_invalid_command_frac", relaunch)
+        self.assertIn("leftover_missing_base_velocity", relaunch)
+        self.assertIn("leftover_missing_joint_pos_action", relaunch)
+        self.assertIn("leftover_missing_class_type", relaunch)
+        self.assertIn("leftover_wait_for_textures", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)

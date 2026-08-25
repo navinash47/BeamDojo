@@ -183,6 +183,26 @@ if ! grep -q "def leftover_missing_robot" "$REPO/scripts/rsl_rl/beamdojo_runtime
   echo "beamdojo_runtime.py is missing leftover null-robot restore. Pull ${REF} or Hydra scene.robot=None dies at gym.make." >&2
   exit 1
 fi
+if ! grep -q "def leftover_invalid_command_frac" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover velocity-command fraction restore. Pull ${REF} or rel_standing_envs=None TypeErrors at first reset." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_missing_base_velocity" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover commands.base_velocity restore. Pull ${REF} or Hydra-nulled commands die at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_missing_joint_pos_action" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover actions.joint_pos restore. Pull ${REF} or Hydra-nulled joint_pos dies at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_missing_class_type" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover class_type restore. Pull ${REF} or Command/Action manager calls None at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_wait_for_textures" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover wait_for_textures drop. Pull ${REF} or Nucleus texture wait stalls gym.make before W&B." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1

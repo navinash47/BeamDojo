@@ -653,6 +653,73 @@ def leftover_missing_contact_forces(scene) -> bool:
     return scene is not None and getattr(scene, "contact_forces", None) is None
 
 
+def leftover_invalid_command_frac(value) -> bool:
+    """Isaac 2.3.2 ``<= rel_standing_envs`` TypeErrors at first reset if leftover is None."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return True
+    return number != number or number < 0.0 or number > 1.0
+
+
+def leftover_wrong_scene_asset_name(value) -> bool:
+    """``env.scene[asset_name]`` KeyErrors at gym.make unless the name is ``robot``."""
+    if value is None:
+        return True
+    return str(value).strip() != "robot"
+
+
+def leftover_missing_base_velocity(env_cfg) -> bool:
+    commands = getattr(env_cfg, "commands", None)
+    if commands is None:
+        return True
+    if isinstance(commands, dict):
+        return commands.get("base_velocity") is None
+    return getattr(commands, "base_velocity", None) is None
+
+
+def leftover_missing_joint_pos_action(env_cfg) -> bool:
+    actions = getattr(env_cfg, "actions", None)
+    if actions is None:
+        return True
+    if isinstance(actions, dict):
+        return actions.get("joint_pos") is None
+    return getattr(actions, "joint_pos", None) is None
+
+
+def leftover_invalid_rel_frac(cmd, name: str) -> bool:
+    """Isaac samples ``rel_standing_envs`` / ``rel_heading_envs`` even when heading is off."""
+    if cmd is None:
+        return False
+    if isinstance(cmd, dict):
+        return leftover_invalid_command_frac(cmd.get(name))
+    if not hasattr(cmd, name):
+        return True
+    return leftover_invalid_command_frac(getattr(cmd, name))
+
+
+def leftover_missing_class_type(cfg) -> bool:
+    """Command/Action manager calls ``cfg.class_type(...)`` at gym.make."""
+    if cfg is None:
+        return False
+    if isinstance(cfg, dict):
+        return cfg.get("class_type") is None
+    return getattr(cfg, "class_type", None) is None
+
+
+def leftover_wait_for_textures(sim) -> bool:
+    """Isaac default True stalls gym.make when leftover Nucleus materials never load."""
+    if sim is None:
+        return False
+    if isinstance(sim, dict):
+        if "wait_for_textures" not in sim:
+            return False
+        return sim.get("wait_for_textures") is not False
+    if not hasattr(sim, "wait_for_textures"):
+        return False
+    return getattr(sim, "wait_for_textures") is not False
+
+
 def leftover_invalid_env_spacing(scene) -> bool:
     """``None`` / parent ``2.5`` overlaps 1024 H1s at gym.make. Play ``6.0`` stays."""
     if scene is None or not hasattr(scene, "env_spacing"):
@@ -1671,6 +1738,148 @@ def _reassert_velocity_ranges(env_cfg) -> None:
             setattr(ranges, key, default)
 
 
+def _manager_get(obj, name):
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _manager_set(obj, name, value) -> None:
+    if obj is None:
+        return
+    if isinstance(obj, dict):
+        obj[name] = value
+        return
+    setattr(obj, name, value)
+
+
+def _base_velocity_stub(env_cfg):
+    stage2 = env_cfg_stage(env_cfg) == 2
+    return type(
+        "UniformVelocityCommandCfg",
+        (),
+        {
+            "asset_name": "robot",
+            "heading_command": False,
+            "debug_vis": False,
+            "resampling_time_range": (10.0, 10.0),
+            "rel_standing_envs": 0.1 if stage2 else 0.5,
+            "rel_heading_envs": 0.0,
+            "ranges": type(
+                "R",
+                (),
+                {
+                    "lin_vel_x": (0.2, 0.8) if stage2 else (-1.0, 1.0),
+                    "lin_vel_y": (-0.15, 0.15) if stage2 else (-1.0, 1.0),
+                    "ang_vel_z": (-0.4, 0.4) if stage2 else (-1.0, 1.0),
+                    "heading": None,
+                },
+            )(),
+        },
+    )()
+
+
+def _joint_pos_action_stub(env_cfg):
+    names = [".*"]
+    if _treat_as_g1(env_cfg):
+        try:
+            from h1_cfg.robot_spec import G1
+
+            names = list(G1.action_joints)
+        except ImportError:
+            names = [
+                ".*_hip_yaw_joint",
+                ".*_hip_roll_joint",
+                ".*_hip_pitch_joint",
+                ".*_knee_joint",
+                ".*_ankle_pitch_joint",
+                ".*_ankle_roll_joint",
+            ]
+    return type("JointPositionActionCfg", (), {"asset_name": "robot", "joint_names": names, "scale": 0.25})()
+
+
+def _reassert_velocity_command(env_cfg) -> None:
+    """Leftover None ``rel_*`` / missing ``base_velocity`` dies at first reset before W&B."""
+    if leftover_missing_base_velocity(env_cfg):
+        print("[WARN] Restoring leftover commands.base_velocity (UniformVelocityCommand at gym.make).")
+        commands = getattr(env_cfg, "commands", None)
+        if commands is None:
+            env_cfg.commands = type("Commands", (), {})()
+            commands = env_cfg.commands
+        try:
+            from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import CommandsCfg
+
+            restored = CommandsCfg().base_velocity
+            restored.heading_command = False
+            restored.debug_vis = False
+        except ImportError:
+            restored = _base_velocity_stub(env_cfg)
+        _manager_set(commands, "base_velocity", restored)
+
+    cmd = _manager_get(getattr(env_cfg, "commands", None), "base_velocity")
+    if cmd is None:
+        return
+    if leftover_wrong_scene_asset_name(_manager_get(cmd, "asset_name")):
+        print(f"[WARN] Restoring leftover commands.base_velocity.asset_name={_manager_get(cmd, 'asset_name')!r} to robot.")
+        _manager_set(cmd, "asset_name", "robot")
+    if leftover_invalid_rel_frac(cmd, "rel_standing_envs"):
+        standing = 0.1 if env_cfg_stage(env_cfg) == 2 else 0.5
+        print(f"[WARN] Restoring leftover commands.base_velocity.rel_standing_envs to {standing}.")
+        _manager_set(cmd, "rel_standing_envs", standing)
+    if leftover_invalid_rel_frac(cmd, "rel_heading_envs"):
+        print("[WARN] Restoring leftover commands.base_velocity.rel_heading_envs to 0.0.")
+        _manager_set(cmd, "rel_heading_envs", 0.0)
+    if leftover_missing_class_type(cmd):
+        print("[WARN] Restoring leftover commands.base_velocity.class_type (CommandManager at gym.make).")
+        try:
+            from isaaclab.envs.mdp.commands import UniformVelocityCommand
+
+            _manager_set(cmd, "class_type", UniformVelocityCommand)
+        except ImportError:
+            _manager_set(cmd, "class_type", type("UniformVelocityCommand", (), {}))
+    # Official BeamDojo keeps heading off. Isaac 2.3.2 ValueErrors heading=True + ranges.heading=None.
+    _manager_set(cmd, "heading_command", False)
+    _manager_set(cmd, "debug_vis", False)
+
+
+def _reassert_missing_joint_pos_action(env_cfg) -> None:
+    """Leftover nulled ``actions.joint_pos`` KeyErrors ActionManager at gym.make."""
+    if leftover_missing_joint_pos_action(env_cfg):
+        print("[WARN] Restoring leftover actions.joint_pos (ActionManager at gym.make).")
+        actions = getattr(env_cfg, "actions", None)
+        if actions is None:
+            env_cfg.actions = type("Actions", (), {})()
+            actions = env_cfg.actions
+        try:
+            from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import ActionsCfg
+
+            restored = ActionsCfg().joint_pos
+            if _treat_as_g1(env_cfg):
+                from h1_cfg.robot_spec import G1
+
+                restored.joint_names = list(G1.action_joints)
+        except ImportError:
+            restored = _joint_pos_action_stub(env_cfg)
+        _manager_set(actions, "joint_pos", restored)
+    joint_pos = _manager_get(getattr(env_cfg, "actions", None), "joint_pos")
+    if leftover_wrong_scene_asset_name(_manager_get(joint_pos, "asset_name")):
+        print(
+            f"[WARN] Restoring leftover actions.joint_pos.asset_name="
+            f"{_manager_get(joint_pos, 'asset_name')!r} to robot."
+        )
+        _manager_set(joint_pos, "asset_name", "robot")
+    if leftover_missing_class_type(joint_pos):
+        print("[WARN] Restoring leftover actions.joint_pos.class_type (ActionManager at gym.make).")
+        try:
+            from isaaclab.envs.mdp.actions import JointPositionAction
+
+            _manager_set(joint_pos, "class_type", JointPositionAction)
+        except ImportError:
+            _manager_set(joint_pos, "class_type", type("JointPositionAction", (), {}))
+
+
 def _public_field_names(obj) -> list[str]:
     """Instance + class fields. ``type('X', (), {field: ...})`` stores on the class."""
     names: list[str] = []
@@ -1861,6 +2070,12 @@ def _reassert_sim_timing(env_cfg) -> None:
         if ri < 1 and dec_n >= 1:
             print(f"[WARN] Restoring leftover sim.render_interval={dec_n}.")
             sim.render_interval = dec_n
+    if leftover_wait_for_textures(sim):
+        print("[WARN] Disabling leftover sim.wait_for_textures (Nucleus stall at gym.make).")
+        if isinstance(sim, dict):
+            sim["wait_for_textures"] = False
+        else:
+            sim.wait_for_textures = False
 
 
 def _world_catcher_stub():
@@ -2532,14 +2747,7 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
         spawn.texture_file = None
 
     _reassert_obs_height_scan(env_cfg)
-
-    commands = getattr(env_cfg, "commands", None)
-    base_velocity = getattr(commands, "base_velocity", None)
-    if base_velocity is not None:
-        if hasattr(base_velocity, "debug_vis"):
-            base_velocity.debug_vis = False
-        if hasattr(base_velocity, "heading_command"):
-            base_velocity.heading_command = False
+    _reassert_velocity_command(env_cfg)
 
     sim = getattr(env_cfg, "sim", None)
     mat = getattr(terrain, "physics_material", None) if terrain is not None else None
@@ -2564,6 +2772,7 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     _reassert_init_joint_state(env_cfg)
     _reassert_init_root_rot(env_cfg)
     _reassert_nucleus_visual_materials(env_cfg)
+    _reassert_missing_joint_pos_action(env_cfg)
     _reassert_action_joint_maps(env_cfg)
     _reassert_contact_sensors(env_cfg)
     _reassert_velocity_ranges(env_cfg)
