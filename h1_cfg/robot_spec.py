@@ -20,6 +20,18 @@ class RobotSpec:
     scanner_prim: str
 
 
+# Official Isaac Lab 2.3.2 G1 locomotion (fingers still present on G1_MINIMAL_CFG).
+G1_FINGER_JOINTS = [
+    ".*_five_joint",
+    ".*_three_joint",
+    ".*_six_joint",
+    ".*_four_joint",
+    ".*_zero_joint",
+    ".*_one_joint",
+    ".*_two_joint",
+]
+
+
 H1 = RobotSpec(
     name="h1",
     pelvis_z=1.05,

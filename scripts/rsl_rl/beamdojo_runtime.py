@@ -207,7 +207,10 @@ def inactive_rsl_optional_cfg(name: str, value) -> bool:
             weight = 0.0
         return weight == 0.0 and not value.get("weight_schedule")
     if name == "symmetry_cfg":
-        return not value.get("use_data_augmentation") and not value.get("use_mirror_loss")
+        if not value.get("use_data_augmentation") and not value.get("use_mirror_loss"):
+            return True
+        # Leftover "enabled" flags without a callable still KeyError in PPO.__init__.
+        return not value.get("data_augmentation_func")
     return False
 
 
@@ -246,8 +249,67 @@ def leftover_all_joints(names) -> bool:
     """True for parent locomotion ``joint_names=[".*"]`` (full-body leftover)."""
     if names is None:
         return False
-    items = list(names) if isinstance(names, (list, tuple)) else [names]
-    return len(items) == 1 and str(items[0]) == ".*"
+    items = names_as_list(names)
+    return len(items) == 1 and items[0] == ".*"
+
+
+def names_as_list(names) -> list[str]:
+    if names is None:
+        return []
+    items = names if isinstance(names, (list, tuple)) else [names]
+    return [str(item) for item in items]
+
+
+def names_match(left, right) -> bool:
+    return tuple(names_as_list(left)) == tuple(names_as_list(right))
+
+
+# Official H1 regexes that do not ``re.fullmatch`` G1 ``*_joint`` names.
+H1_JOINTS_MISS_G1 = {
+    ".*_hip_yaw",
+    ".*_hip_roll",
+    ".*_ankle",
+    "torso",
+    ".*_elbow",
+}
+H1_BODIES_MISS_G1 = {".*_ankle_link", ".*ankle_link"}
+G1_JOINTS_MISS_H1 = {
+    ".*_hip_yaw_joint",
+    ".*_hip_roll_joint",
+    ".*_hip_pitch_joint",
+    ".*_knee_joint",
+    ".*_ankle_pitch_joint",
+    ".*_ankle_roll_joint",
+    ".*_shoulder_pitch_joint",
+    ".*_shoulder_roll_joint",
+    ".*_shoulder_yaw_joint",
+    ".*_elbow_pitch_joint",
+    ".*_elbow_roll_joint",
+    "torso_joint",
+}
+G1_BODIES_MISS_H1 = {".*_ankle_roll_link"}
+
+
+def leftover_h1_joints_for_g1(names) -> bool:
+    """True when leftover H1 regexes fail Isaac 2.3.2 ``re.fullmatch`` on G1."""
+    return any(item in H1_JOINTS_MISS_G1 for item in names_as_list(names))
+
+
+def leftover_h1_bodies_for_g1(names) -> bool:
+    return any(item in H1_BODIES_MISS_G1 for item in names_as_list(names))
+
+
+def leftover_g1_joints_for_h1(names) -> bool:
+    """True when leftover G1 ``*_joint`` regexes miss official H1 joint names."""
+    return any(item in G1_JOINTS_MISS_H1 for item in names_as_list(names))
+
+
+def leftover_g1_bodies_for_h1(names) -> bool:
+    return any(item in G1_BODIES_MISS_H1 for item in names_as_list(names))
+
+
+def leftover_h1_torso_name(names) -> bool:
+    return names_as_list(names) == ["torso"]
 
 
 def _ensure_obs_groups(train_cfg: dict) -> None:
@@ -274,7 +336,8 @@ def _reassert_double_critic_class_names(train_cfg: dict) -> None:
     """Hydra leftover restores parent ``ActorCritic`` / ``PPO``.
 
     That still boots and logs, but it is not BeamDojo double-critic. Distillation
-    keeps its own class names.
+    keeps its own class names. ``ActorCriticRecurrent`` leftover crashes
+    ``OnPolicyRunner.__init__`` when ``rnn_type`` is missing — before W&B.
     """
     algorithm = train_cfg.get("algorithm")
     if not isinstance(algorithm, dict):
@@ -285,9 +348,68 @@ def _reassert_double_critic_class_names(train_cfg: dict) -> None:
         print("[WARN] Restoring leftover algorithm.class_name to PPODoubleCritic.")
         algorithm["class_name"] = "PPODoubleCritic"
     policy = train_cfg.get("policy")
-    if isinstance(policy, dict) and policy.get("class_name") in (None, "", "ActorCritic"):
+    if isinstance(policy, dict) and policy.get("class_name") in (
+        None,
+        "",
+        "ActorCritic",
+        "ActorCriticRecurrent",
+    ):
         print("[WARN] Restoring leftover policy.class_name to ActorCriticDouble.")
         policy["class_name"] = "ActorCriticDouble"
+
+
+PAPER_MLP_DIMS = [512, 216, 128]
+
+
+def _reassert_paper_mlp(train_cfg: dict) -> None:
+    """Official H1 leftover is ``[512, 256, 128]``. Paper / double critic is ``[512, 216, 128]``."""
+    algorithm = train_cfg.get("algorithm")
+    if isinstance(algorithm, dict) and algorithm.get("class_name") == "Distillation":
+        return
+    policy = train_cfg.get("policy")
+    if not isinstance(policy, dict):
+        return
+    for key in ("actor_hidden_dims", "critic_hidden_dims"):
+        dims = policy.get(key)
+        try:
+            current = [int(x) for x in list(dims)]
+        except (TypeError, ValueError):
+            current = []
+        if current != PAPER_MLP_DIMS:
+            print(f"[WARN] Restoring leftover policy.{key} to paper {PAPER_MLP_DIMS}.")
+            policy[key] = list(PAPER_MLP_DIMS)
+
+
+def _drop_on_policy_runner_kwarg_collisions(train_cfg: dict) -> None:
+    """rsl-rl 3.0.1 ``OnPolicyRunner._construct_algorithm`` passes ``device=`` and
+    ``multi_gpu_cfg=`` explicitly. A leftover key in the Hydra dump is
+    ``TypeError: multiple values for keyword argument`` — before ``wandb.init``.
+
+    Empty ``multi_gpu_cfg: {}`` is also not None, so PPO then KeyErrors
+    ``global_rank`` in ``__init__``.
+    """
+    algorithm = train_cfg.get("algorithm")
+    if isinstance(algorithm, dict):
+        for key in ("device", "multi_gpu_cfg"):
+            if key in algorithm:
+                print(f"[WARN] Dropping leftover algorithm.{key} (OnPolicyRunner supplies it).")
+                algorithm.pop(key, None)
+    policy = train_cfg.get("policy")
+    if isinstance(policy, dict):
+        for key in ("obs", "obs_groups", "num_actions"):
+            if key in policy:
+                print(f"[WARN] Dropping leftover policy.{key} (ActorCritic is called positionally).")
+                policy.pop(key, None)
+
+
+def _ensure_runner_intervals(train_cfg: dict) -> None:
+    """``OnPolicyRunner.__init__`` KeyErrors if these are leftover-MISSING."""
+    if not train_cfg.get("num_steps_per_env"):
+        print("[WARN] Restoring leftover num_steps_per_env=24.")
+        train_cfg["num_steps_per_env"] = 24
+    if not train_cfg.get("save_interval"):
+        print("[WARN] Restoring leftover save_interval=100.")
+        train_cfg["save_interval"] = 100
 
 
 def sanitize_rsl_rl_train_cfg(train_cfg: dict) -> dict:
@@ -307,6 +429,9 @@ def sanitize_rsl_rl_train_cfg(train_cfg: dict) -> dict:
                 algorithm[key] = None
     _ensure_obs_groups(train_cfg)
     _reassert_double_critic_class_names(train_cfg)
+    _reassert_paper_mlp(train_cfg)
+    _drop_on_policy_runner_kwarg_collisions(train_cfg)
+    _ensure_runner_intervals(train_cfg)
     return train_cfg
 
 
@@ -392,6 +517,98 @@ def _set_entity_body_names(entity, names) -> None:
         entity.body_names = names
 
 
+def _entity_joint_names(entity):
+    if entity is None:
+        return None
+    if isinstance(entity, dict):
+        return entity.get("joint_names")
+    return getattr(entity, "joint_names", None)
+
+
+def _set_entity_joint_names(entity, names) -> None:
+    if entity is None:
+        return
+    if isinstance(entity, dict):
+        entity["joint_names"] = names
+    elif hasattr(entity, "joint_names"):
+        entity.joint_names = names
+
+
+def _robot_identity_blob(env_cfg) -> str:
+    parts = [type(env_cfg).__name__]
+    scene = getattr(env_cfg, "scene", None)
+    robot = getattr(scene, "robot", None)
+    objs = [robot, getattr(robot, "spawn", None) if robot is not None else None]
+    for obj in objs:
+        if obj is None:
+            continue
+        if isinstance(obj, str):
+            parts.append(obj)
+            continue
+        mapping = obj if isinstance(obj, dict) else None
+        for attr in ("usd_path", "usd_file", "asset_path", "prim_path"):
+            value = mapping.get(attr) if mapping is not None else getattr(obj, attr, None)
+            if value:
+                parts.append(str(value))
+    return " ".join(parts).lower()
+
+
+def _init_pelvis_z(env_cfg):
+    robot = getattr(getattr(env_cfg, "scene", None), "robot", None)
+    state = getattr(robot, "init_state", None)
+    pos = getattr(state, "pos", None)
+    if pos is None and isinstance(state, dict):
+        pos = state.get("pos")
+    if pos is None:
+        return None
+    try:
+        return float(pos[2])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def env_cfg_robot_kind(env_cfg) -> str | None:
+    """``g1`` / ``h1`` from USD, class name, action joints, or pelvis height."""
+    blob = _robot_identity_blob(env_cfg)
+    has_g1 = bool(re.search(r"(?:^|[^a-z0-9])g1(?:[^a-z0-9]|$)", blob))
+    has_h1 = bool(re.search(r"(?:^|[^a-z0-9])h1(?:[^a-z0-9]|$)", blob))
+    if has_g1 and not has_h1:
+        return "g1"
+    if has_h1 and not has_g1:
+        return "h1"
+
+    actions = getattr(env_cfg, "actions", None)
+    joint_pos = getattr(actions, "joint_pos", None)
+    action_names = getattr(joint_pos, "joint_names", None) if joint_pos is not None else None
+    if action_names and not leftover_all_joints(action_names):
+        items = set(names_as_list(action_names))
+        if items & G1_JOINTS_MISS_H1:
+            return "g1"
+
+    z = _init_pelvis_z(env_cfg)
+    if z is not None:
+        # spawn_robot: pelvis_z + beam_top (0.24 + 0.04).
+        if abs(z - 1.02) <= 0.12:
+            return "g1"
+        if abs(z - 1.33) <= 0.12:
+            return "h1"
+    return None
+
+
+def _treat_as_g1(env_cfg) -> bool:
+    kind = env_cfg_robot_kind(env_cfg)
+    if kind == "g1":
+        return True
+    if kind == "h1":
+        return False
+    rewards = getattr(env_cfg, "rewards", None)
+    return rewards is not None and getattr(rewards, "joint_deviation_fingers", None) is not None
+
+
+def _treat_as_h1(env_cfg) -> bool:
+    return env_cfg_robot_kind(env_cfg) == "h1"
+
+
 def _scene_uses_stones(scene) -> bool:
     return scene is not None and getattr(scene, "task_stone_0", None) is not None
 
@@ -427,8 +644,7 @@ def _reassert_physx_floors(env_cfg) -> None:
 
 def _reassert_g1_action_joints(env_cfg) -> None:
     """Parent leftover ``joint_names=[".*"]`` puts G1 arms/fingers back in the action."""
-    rewards = getattr(env_cfg, "rewards", None)
-    if rewards is None or getattr(rewards, "joint_deviation_fingers", None) is None:
+    if not _treat_as_g1(env_cfg):
         return
     actions = getattr(env_cfg, "actions", None)
     joint_pos = getattr(actions, "joint_pos", None)
@@ -441,6 +657,98 @@ def _reassert_g1_action_joints(env_cfg) -> None:
         return
     print("[WARN] Restoring leftover G1 action joints off parent '.*' (paper: 12 lower-body).")
     joint_pos.joint_names = list(G1.action_joints)
+
+
+def _restore_entity_names(entity, kind: str, expected, label: str) -> None:
+    if entity is None or expected is None:
+        return
+    current = _entity_joint_names(entity) if kind == "joint" else _entity_body_names(entity)
+    if current is None or names_match(current, expected):
+        return
+    print(f"[WARN] Restoring leftover {label} so Isaac 2.3.2 re.fullmatch can resolve joints/bodies.")
+    if kind == "joint":
+        _set_entity_joint_names(entity, expected)
+    else:
+        _set_entity_body_names(entity, expected)
+
+
+def _restore_robot_name_filters(env_cfg, spec, *, finger_joints=None) -> None:
+    rewards = getattr(env_cfg, "rewards", None)
+    if rewards is not None:
+        hip = [spec.hip_yaw, spec.hip_roll]
+        mapping = (
+            ("dof_pos_limits", "asset_cfg", "joint", spec.ankle_joints),
+            ("joint_deviation_hip", "asset_cfg", "joint", hip),
+            ("joint_deviation_arms", "asset_cfg", "joint", spec.arm_joints),
+            ("joint_deviation_torso", "asset_cfg", "joint", spec.torso_joint),
+            ("feet_air_time", "sensor_cfg", "body", spec.feet_body),
+            ("feet_slide", "sensor_cfg", "body", spec.feet_body),
+            ("feet_slide", "asset_cfg", "body", spec.feet_body),
+            ("foothold_penalty", "sensor_cfg", "body", spec.feet_body),
+        )
+        if finger_joints is not None:
+            mapping += (("joint_deviation_fingers", "asset_cfg", "joint", finger_joints),)
+        if spec.name == "g1":
+            mapping += (
+                ("dof_acc_l2", "asset_cfg", "joint", [".*_hip_.*", ".*_knee_joint"]),
+                ("dof_torques_l2", "asset_cfg", "joint", [".*_hip_.*", ".*_knee_joint", ".*_ankle_.*"]),
+            )
+        for term_name, key, kind, expected in mapping:
+            term = getattr(rewards, term_name, None)
+            _restore_entity_names(
+                _term_entity_cfg(term, key),
+                kind,
+                expected,
+                f"rewards.{term_name}.{key}",
+            )
+
+    terms = getattr(env_cfg, "terminations", None)
+    if terms is not None:
+        off_terrain = getattr(terms, "off_terrain", None)
+        _restore_entity_names(
+            _term_entity_cfg(off_terrain, "sensor_cfg"),
+            "body",
+            spec.feet_body,
+            "terminations.off_terrain.sensor_cfg",
+        )
+
+
+def _reassert_g1_joint_fullmatch(env_cfg) -> None:
+    """H1 leftover ``torso`` / ``.*_hip_yaw`` does not fullmatch G1 ``*_joint`` names.
+
+    RewardManager raises at ``gym.make`` — before ``wandb.init``.
+    """
+    if not _treat_as_g1(env_cfg):
+        return
+    try:
+        from h1_cfg.robot_spec import G1, G1_FINGER_JOINTS
+    except ImportError as exc:
+        print(f"[WARN] G1 joint-name reassert skipped ({type(exc).__name__}: {exc})")
+        return
+    _restore_robot_name_filters(env_cfg, G1, finger_joints=list(G1_FINGER_JOINTS))
+
+
+def _drop_h1_leftover_fingers(env_cfg) -> None:
+    """H1 has no finger joints. A leftover G1 term crashes ``resolve_matching_names``."""
+    if not _treat_as_h1(env_cfg):
+        return
+    rewards = getattr(env_cfg, "rewards", None)
+    if rewards is None or getattr(rewards, "joint_deviation_fingers", None) is None:
+        return
+    print("[WARN] Clearing leftover rewards.joint_deviation_fingers (H1 has no finger joints).")
+    rewards.joint_deviation_fingers = None
+
+
+def _reassert_h1_joint_fullmatch(env_cfg) -> None:
+    """G1 leftover ``*_joint`` regexes miss official H1 names (no ``_joint`` suffix)."""
+    if not _treat_as_h1(env_cfg):
+        return
+    try:
+        from h1_cfg.robot_spec import H1
+    except ImportError as exc:
+        print(f"[WARN] H1 joint-name reassert skipped ({type(exc).__name__}: {exc})")
+        return
+    _restore_robot_name_filters(env_cfg, H1)
 
 
 def _pose_range_from_reset(reset_base):
@@ -691,6 +999,9 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
 
     _reassert_anymal_body_names(env_cfg)
     _reassert_g1_action_joints(env_cfg)
+    _reassert_g1_joint_fullmatch(env_cfg)
+    _drop_h1_leftover_fingers(env_cfg)
+    _reassert_h1_joint_fullmatch(env_cfg)
     _reassert_official_reset_events(env_cfg)
     _reassert_stage2_reset_on_beam(env_cfg)
     _reassert_infinite_horizon(env_cfg)

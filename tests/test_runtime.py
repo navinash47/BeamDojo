@@ -707,6 +707,64 @@ class RunnerCfgSanitizeTests(unittest.TestCase):
         self.assertEqual(cfg["policy"]["class_name"], "ActorCriticDouble")
         self.assertEqual(cfg["algorithm"]["class_name"], "PPODoubleCritic")
 
+    def test_leftover_recurrent_actor_is_restored(self):
+        cfg = {"policy": {"class_name": "ActorCriticRecurrent"}, "algorithm": {"class_name": "PPO"}}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["policy"]["class_name"], "ActorCriticDouble")
+        self.assertEqual(cfg["algorithm"]["class_name"], "PPODoubleCritic")
+
+    def test_leftover_official_h1_mlp_is_paper_dims(self):
+        cfg = {
+            "policy": {
+                "class_name": "ActorCritic",
+                "actor_hidden_dims": [512, 256, 128],
+                "critic_hidden_dims": [512, 256, 128],
+            },
+            "algorithm": {"class_name": "PPO"},
+        }
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["policy"]["actor_hidden_dims"], [512, 216, 128])
+        self.assertEqual(cfg["policy"]["critic_hidden_dims"], [512, 216, 128])
+
+    def test_leftover_algorithm_device_and_empty_multi_gpu_are_dropped(self):
+        cfg = {
+            "algorithm": {
+                "class_name": "PPODoubleCritic",
+                "device": "cuda:0",
+                "multi_gpu_cfg": {},
+            },
+            "policy": {
+                "class_name": "ActorCriticDouble",
+                "obs": {"policy": [1]},
+                "obs_groups": {"policy": ["policy"]},
+                "num_actions": 19,
+            },
+        }
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertNotIn("device", cfg["algorithm"])
+        self.assertNotIn("multi_gpu_cfg", cfg["algorithm"])
+        self.assertNotIn("obs", cfg["policy"])
+        self.assertNotIn("obs_groups", cfg["policy"])
+        self.assertNotIn("num_actions", cfg["policy"])
+
+    def test_leftover_missing_runner_intervals_are_restored(self):
+        cfg = {"algorithm": {"class_name": "PPODoubleCritic"}}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["num_steps_per_env"], 24)
+        self.assertEqual(cfg["save_interval"], 100)
+
+    def test_incomplete_symmetry_cfg_is_sanitized_to_none(self):
+        cfg = {
+            "algorithm": {
+                "symmetry_cfg": {
+                    "use_data_augmentation": True,
+                    "use_mirror_loss": False,
+                }
+            }
+        }
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertIsNone(cfg["algorithm"]["symmetry_cfg"])
+
     def test_valid_obs_groups(self):
         self.assertTrue(self.rt.valid_obs_groups({"policy": ["policy"], "critic": ["policy"]}))
         self.assertFalse(self.rt.valid_obs_groups(None))
@@ -1043,6 +1101,135 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.rt.reassert_gpu_env_cfg(cfg)
         self.assertEqual(joint_pos.joint_names, [".*"])
 
+    def test_leftover_h1_regexes_are_restored_on_g1(self):
+        from h1_cfg.robot_spec import G1, G1_FINGER_JOINTS
+
+        hip = type("E", (), {"joint_names": [".*_hip_yaw", ".*_hip_roll"]})()
+        torso = type("E", (), {"joint_names": "torso"})()
+        ankle = type("E", (), {"joint_names": ".*_ankle"})()
+        arms = type("E", (), {"joint_names": [".*_shoulder_.*", ".*_elbow"]})()
+        fingers = type("E", (), {"joint_names": list(G1_FINGER_JOINTS)})()
+        feet = type("E", (), {"body_names": ".*ankle_link"})()
+        joint_pos = type("J", (), {"joint_names": [".*"]})()
+        robot = type("R", (), {"usd_path": "/Isaac/Robots/Unitree/G1/g1_minimal.usd"})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": None, "robot": robot},
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "rewards": type(
+                    "Rew",
+                    (),
+                    {
+                        "joint_deviation_fingers": type("T", (), {"params": {"asset_cfg": fingers}})(),
+                        "joint_deviation_hip": type("T", (), {"params": {"asset_cfg": hip}})(),
+                        "joint_deviation_torso": type("T", (), {"params": {"asset_cfg": torso}})(),
+                        "joint_deviation_arms": type("T", (), {"params": {"asset_cfg": arms}})(),
+                        "dof_pos_limits": type("T", (), {"params": {"asset_cfg": ankle}})(),
+                        "feet_air_time": type("T", (), {"params": {"sensor_cfg": feet}})(),
+                    },
+                )(),
+                "actions": type("Act", (), {"joint_pos": joint_pos})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(joint_pos.joint_names, list(G1.action_joints))
+        self.assertEqual(hip.joint_names, [G1.hip_yaw, G1.hip_roll])
+        self.assertEqual(torso.joint_names, G1.torso_joint)
+        self.assertEqual(ankle.joint_names, G1.ankle_joints)
+        self.assertEqual(arms.joint_names, G1.arm_joints)
+        self.assertEqual(fingers.joint_names, list(G1_FINGER_JOINTS))
+        self.assertEqual(feet.body_names, G1.feet_body)
+        self.assertIsNotNone(cfg.rewards.joint_deviation_fingers)
+
+    def test_h1_leftover_fingers_are_dropped_and_g1_regexes_are_not_applied(self):
+        from h1_cfg.robot_spec import H1, G1_FINGER_JOINTS
+
+        hip = type("E", (), {"joint_names": [".*_hip_yaw", ".*_hip_roll"]})()
+        torso = type("E", (), {"joint_names": "torso"})()
+        fingers = type("E", (), {"joint_names": list(G1_FINGER_JOINTS)})()
+        joint_pos = type("J", (), {"joint_names": [".*"]})()
+        robot = type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": None, "robot": robot},
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "rewards": type(
+                    "Rew",
+                    (),
+                    {
+                        "joint_deviation_fingers": type("T", (), {"params": {"asset_cfg": fingers}})(),
+                        "joint_deviation_hip": type("T", (), {"params": {"asset_cfg": hip}})(),
+                        "joint_deviation_torso": type("T", (), {"params": {"asset_cfg": torso}})(),
+                    },
+                )(),
+                "actions": type("Act", (), {"joint_pos": joint_pos})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNone(cfg.rewards.joint_deviation_fingers)
+        self.assertEqual(joint_pos.joint_names, [".*"])
+        self.assertEqual(hip.joint_names, [H1.hip_yaw, H1.hip_roll])
+        self.assertEqual(torso.joint_names, H1.torso_joint)
+
+    def test_leftover_g1_regexes_are_restored_on_h1(self):
+        from h1_cfg.robot_spec import H1
+
+        hip = type("E", (), {"joint_names": [".*_hip_yaw_joint", ".*_hip_roll_joint"]})()
+        torso = type("E", (), {"joint_names": "torso_joint"})()
+        robot = type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": None, "robot": robot},
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "rewards": type(
+                    "Rew",
+                    (),
+                    {
+                        "joint_deviation_fingers": None,
+                        "joint_deviation_hip": type("T", (), {"params": {"asset_cfg": hip}})(),
+                        "joint_deviation_torso": type("T", (), {"params": {"asset_cfg": torso}})(),
+                    },
+                )(),
+                "actions": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(hip.joint_names, [H1.hip_yaw, H1.hip_roll])
+        self.assertEqual(torso.joint_names, H1.torso_joint)
+
+    def test_leftover_joint_name_helpers(self):
+        self.assertTrue(self.rt.leftover_h1_joints_for_g1("torso"))
+        self.assertTrue(self.rt.leftover_h1_joints_for_g1([".*_hip_yaw"]))
+        self.assertTrue(self.rt.leftover_h1_torso_name("torso"))
+        self.assertFalse(self.rt.leftover_h1_torso_name("torso_joint"))
+        self.assertTrue(self.rt.leftover_g1_joints_for_h1("torso_joint"))
+        self.assertTrue(self.rt.leftover_h1_bodies_for_g1(".*ankle_link"))
+        self.assertFalse(self.rt.leftover_h1_joints_for_g1(".*_hip_yaw_joint"))
+
     def test_anymal_parent_body_names(self):
         self.assertTrue(self.rt.anymal_parent_body_names("base"))
         self.assertTrue(self.rt.anymal_parent_body_names(".*THIGH"))
@@ -1163,6 +1350,10 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover curriculum.terrain_levels", runtime)
         self.assertIn("def _ensure_obs_groups", runtime)
         self.assertIn("def beamdojo_obs_groups_ok", runtime)
+        self.assertIn("def _drop_on_policy_runner_kwarg_collisions", runtime)
+        self.assertIn("def _reassert_g1_joint_fullmatch", runtime)
+        self.assertIn("def _drop_h1_leftover_fingers", runtime)
+        self.assertIn("ActorCriticRecurrent", runtime)
         self.assertIn("is_finite_horizon", runtime)
         self.assertIn("PPODoubleCritic", runtime)
         self.assertIn("ActorCriticDouble", runtime)
@@ -1201,6 +1392,9 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover curriculum.terrain_levels", relaunch)
         self.assertIn("_ensure_obs_groups", relaunch)
         self.assertIn("beamdojo_obs_groups_ok", relaunch)
+        self.assertIn("_drop_on_policy_runner_kwarg_collisions", relaunch)
+        self.assertIn("_reassert_g1_joint_fullmatch", relaunch)
+        self.assertIn("_drop_h1_leftover_fingers", relaunch)
         self.assertIn("write_boot_status", stage1)
         self.assertIn("write_boot_status", stage2)
         self.assertIn('checkout -f -B "$REF" "origin/${REF}"', relaunch)

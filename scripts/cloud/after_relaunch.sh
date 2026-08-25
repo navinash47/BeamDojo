@@ -79,6 +79,18 @@ if ! grep -q "def beamdojo_obs_groups_ok" "$REPO/scripts/rsl_rl/beamdojo_runtime
   echo "beamdojo_runtime.py is missing BeamDojo obs_groups pin. Pull ${REF} or leftover critic:['critic'] dies in OnPolicyRunner before wandb.init." >&2
   exit 1
 fi
+if ! grep -q "def _drop_on_policy_runner_kwarg_collisions" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing OnPolicyRunner kwarg sanitize. Pull ${REF} or leftover algorithm.device TypeErrors before wandb.init." >&2
+  exit 1
+fi
+if ! grep -q "def _reassert_g1_joint_fullmatch" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing G1 leftover H1 regex restore. Pull ${REF} or RewardManager re.fullmatch dies at gym.make before W&B." >&2
+  exit 1
+fi
+if ! grep -q "def _drop_h1_leftover_fingers" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing H1 leftover finger drop. Pull ${REF} or leftover G1 fingers crash resolve_matching_names on H1." >&2
+  exit 1
+fi
 if ! grep -q "def apply_physx_gpu_capacity" "$REPO/h1_cfg/beamdojo_common.py"; then
   echo "beamdojo_common.py is missing PhysX GPU buffer bump. Pull ${REF} or cloned beams/stones overflow contact buffers." >&2
   exit 1

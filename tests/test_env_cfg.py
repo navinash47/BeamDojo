@@ -55,8 +55,10 @@ class EnvCfgContractTests(unittest.TestCase):
 
     def test_g1_gets_official_finger_and_leg_filters(self):
         common = _read("h1_cfg/beamdojo_common.py")
-        self.assertIn("G1_FINGER_JOINTS", common)
-        self.assertIn(".*_five_joint", common)
+        spec = _read("h1_cfg/robot_spec.py")
+        self.assertIn("from h1_cfg.robot_spec import G1_FINGER_JOINTS", common)
+        self.assertIn("G1_FINGER_JOINTS", spec)
+        self.assertIn(".*_five_joint", spec)
         self.assertIn("joint_deviation_fingers", common)
         self.assertIn(".*_hip_.*", common)
         self.assertIn(".*_knee_joint", common)

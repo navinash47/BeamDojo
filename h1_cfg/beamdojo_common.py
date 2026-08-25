@@ -21,7 +21,7 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
 
 from h1_cfg import mdp as bd_mdp
-from h1_cfg.robot_spec import H1, RobotSpec
+from h1_cfg.robot_spec import G1_FINGER_JOINTS, H1, RobotSpec
 from h1_cfg.scene_props import (
     BEAM_CENTER_Z,
     BEAM_LENGTH,
@@ -33,18 +33,6 @@ from h1_cfg.scene_props import (
     catcher_cfg,
     task_beam_cfg,
 )
-
-# Official Isaac Lab 2.3.2 G1 locomotion (finger joints still present on G1_MINIMAL_CFG).
-G1_FINGER_JOINTS = [
-    ".*_five_joint",
-    ".*_three_joint",
-    ".*_six_joint",
-    ".*_four_joint",
-    ".*_zero_joint",
-    ".*_one_joint",
-    ".*_two_joint",
-]
-
 
 def spawn_robot(cfg, spec: RobotSpec) -> None:
     """Spawn the official *minimal* USD (fewer collision meshes; A10 1024-env fit)."""
