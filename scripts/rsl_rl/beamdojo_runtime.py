@@ -720,6 +720,47 @@ def leftover_wait_for_textures(sim) -> bool:
     return getattr(sim, "wait_for_textures") is not False
 
 
+def leftover_missing_policy_obs(env_cfg) -> bool:
+    """ObservationManager requires ``observations.policy`` at gym.make."""
+    obs = getattr(env_cfg, "observations", None)
+    if obs is None:
+        return True
+    if isinstance(obs, dict):
+        return obs.get("policy") is None
+    return getattr(obs, "policy", None) is None
+
+
+def leftover_excess_obs_history(value) -> bool:
+    """Any leftover obs history explodes A10 memory at gym.make. BeamDojo uses 0."""
+    if value is None:
+        return False
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return True
+    return number != number or number < 0 or number > 0
+
+
+def leftover_invalid_action_scale(value) -> bool:
+    """``scale=None`` TypeErrors JointPositionAction at gym.make. Dict maps stay."""
+    if isinstance(value, dict):
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return True
+    return number != number or number <= 0.0
+
+
+def leftover_missing_term_func(term) -> bool:
+    """Manager terms call ``cfg.func`` at gym.make. Hydra leftover ``func=None`` dies."""
+    if term is None:
+        return False
+    if isinstance(term, dict):
+        return "func" in term and term.get("func") is None
+    return hasattr(term, "func") and getattr(term, "func") is None
+
+
 def leftover_invalid_env_spacing(scene) -> bool:
     """``None`` / parent ``2.5`` overlaps 1024 H1s at gym.make. Play ``6.0`` stays."""
     if scene is None or not hasattr(scene, "env_spacing"):
@@ -1878,6 +1919,11 @@ def _reassert_missing_joint_pos_action(env_cfg) -> None:
             _manager_set(joint_pos, "class_type", JointPositionAction)
         except ImportError:
             _manager_set(joint_pos, "class_type", type("JointPositionAction", (), {}))
+    if joint_pos is not None and (
+        isinstance(joint_pos, dict) or hasattr(joint_pos, "scale")
+    ) and leftover_invalid_action_scale(_manager_get(joint_pos, "scale")):
+        print("[WARN] Restoring leftover actions.joint_pos.scale to 0.25.")
+        _manager_set(joint_pos, "scale", 0.25)
 
 
 def _public_field_names(obj) -> list[str]:
@@ -1922,6 +1968,57 @@ def _iter_obs_terms(group):
         return
     for key in _public_field_names(group):
         yield key, getattr(group, key, None)
+
+
+def _reassert_missing_policy_obs(env_cfg) -> None:
+    """Leftover nulled ``observations.policy`` dies in ObservationManager at gym.make."""
+    if not leftover_missing_policy_obs(env_cfg):
+        return
+    print("[WARN] Restoring leftover observations.policy (ObservationManager at gym.make).")
+    try:
+        from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import ObservationsCfg
+
+        policy = ObservationsCfg().policy
+    except ImportError:
+        policy = type(
+            "ObsGroup",
+            (),
+            {"concatenate_terms": True, "flatten_history_dim": True, "history_length": 0},
+        )()
+    obs = getattr(env_cfg, "observations", None)
+    if obs is None:
+        env_cfg.observations = type("Observations", (), {"policy": policy})()
+        return
+    _manager_set(obs, "policy", policy)
+
+
+def _reassert_obs_history(env_cfg) -> None:
+    """Leftover RNN ``history_length`` OOMs 1024 envs; leftover ``func=None`` dies at gym.make."""
+    obs = getattr(env_cfg, "observations", None)
+    for group_name, group in _iter_obs_groups(obs):
+        if (isinstance(group, dict) or hasattr(group, "history_length")) and leftover_excess_obs_history(
+            _manager_get(group, "history_length")
+        ):
+            print(
+                f"[WARN] Restoring leftover observations.{group_name}.history_length="
+                f"{_manager_get(group, 'history_length')!r} to 0."
+            )
+            _manager_set(group, "history_length", 0)
+        for term_name, term in _iter_obs_terms(group):
+            if leftover_missing_term_func(term):
+                print(f"[WARN] Clearing leftover observations.{group_name}.{term_name} (func=None).")
+                if isinstance(group, dict):
+                    group[term_name] = None
+                else:
+                    setattr(group, term_name, None)
+                continue
+            if term is not None and (
+                isinstance(term, dict) or hasattr(term, "history_length")
+            ) and leftover_excess_obs_history(_manager_get(term, "history_length")):
+                print(
+                    f"[WARN] Restoring leftover observations.{group_name}.{term_name}.history_length to 0."
+                )
+                _manager_set(term, "history_length", 0)
 
 
 def _reassert_obs_height_scan(env_cfg) -> None:
@@ -2308,6 +2405,10 @@ def _reassert_missing_scene_entity_terms(env_cfg) -> None:
             continue
         for term_name in _public_field_names(group):
             term = getattr(group, term_name, None)
+            if leftover_missing_term_func(term):
+                print(f"[WARN] Clearing leftover {group_name}.{term_name} (func=None).")
+                setattr(group, term_name, None)
+                continue
             if not leftover_missing_scene_entity_term(term, present):
                 continue
             print(f"[WARN] Clearing leftover {group_name}.{term_name} (missing scene entity).")
@@ -2746,7 +2847,9 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
         print("[WARN] Clearing Nucleus HDR sky so headless gym.make does not block before W&B.")
         spawn.texture_file = None
 
+    _reassert_missing_policy_obs(env_cfg)
     _reassert_obs_height_scan(env_cfg)
+    _reassert_obs_history(env_cfg)
     _reassert_velocity_command(env_cfg)
 
     sim = getattr(env_cfg, "sim", None)

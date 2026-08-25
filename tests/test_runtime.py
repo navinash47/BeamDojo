@@ -1767,6 +1767,27 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertFalse(self.rt.leftover_missing_class_type(type("T", (), {"class_type": object})()))
         self.assertTrue(self.rt.leftover_wait_for_textures(type("Sim", (), {"wait_for_textures": True})()))
         self.assertFalse(self.rt.leftover_wait_for_textures(type("Sim", (), {"wait_for_textures": False})()))
+        self.assertTrue(self.rt.leftover_missing_policy_obs(type("C", (), {"observations": None})()))
+        self.assertTrue(
+            self.rt.leftover_missing_policy_obs(
+                type("C", (), {"observations": type("O", (), {"policy": None})()})()
+            )
+        )
+        self.assertFalse(
+            self.rt.leftover_missing_policy_obs(
+                type("C", (), {"observations": type("O", (), {"policy": object()})()})()
+            )
+        )
+        self.assertTrue(self.rt.leftover_excess_obs_history(24))
+        self.assertTrue(self.rt.leftover_excess_obs_history(-1))
+        self.assertFalse(self.rt.leftover_excess_obs_history(0))
+        self.assertTrue(self.rt.leftover_invalid_action_scale(None))
+        self.assertTrue(self.rt.leftover_invalid_action_scale(0.0))
+        self.assertFalse(self.rt.leftover_invalid_action_scale(0.25))
+        self.assertFalse(self.rt.leftover_invalid_action_scale({".*": 0.25}))
+        self.assertTrue(self.rt.leftover_missing_term_func(type("T", (), {"func": None})()))
+        self.assertFalse(self.rt.leftover_missing_term_func(type("T", (), {"func": object()})()))
+        self.assertFalse(self.rt.leftover_missing_term_func(object()))
         h1_act = type(
             "BeamDojoStage1EnvCfg",
             (),
@@ -2297,6 +2318,70 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertIsNotNone(nulled_joint.actions.joint_pos)
         self.assertEqual(nulled_joint.actions.joint_pos.joint_names, [".*"])
 
+    def test_leftover_policy_obs_history_and_action_scale_are_restored(self):
+        policy = type(
+            "P",
+            (),
+            {
+                "history_length": 24,
+                "base_lin_vel": type("T", (), {"func": None, "history_length": 8})(),
+                "base_ang_vel": type("T", (), {"func": object(), "history_length": 8})(),
+            },
+        )()
+        joint_pos = type("J", (), {"asset_name": "robot", "joint_names": [".*"], "scale": 0.0})()
+        dead_reward = type("T", (), {"func": None})()
+        cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})(),
+                    },
+                )(),
+                "observations": type("O", (), {"policy": policy})(),
+                "actions": type("A", (), {"joint_pos": joint_pos})(),
+                "commands": None,
+                "rewards": type("Rew", (), {"alive": dead_reward})(),
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(policy.history_length, 0)
+        self.assertIsNone(policy.base_lin_vel)
+        self.assertEqual(policy.base_ang_vel.history_length, 0)
+        self.assertEqual(joint_pos.scale, 0.25)
+        self.assertIsNone(cfg.rewards.alive)
+
+        missing_policy = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})(),
+                    },
+                )(),
+                "observations": type("O", (), {"policy": None, "critic": object()})(),
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(missing_policy)
+        self.assertIsNotNone(missing_policy.observations.policy)
+        self.assertEqual(missing_policy.observations.policy.history_length, 0)
+        self.assertIsNotNone(missing_policy.observations.critic)
+
     def test_leftover_quad_and_full_usd_helpers(self):
         anymal = type(
             "Cfg",
@@ -2471,6 +2556,10 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_missing_joint_pos_action", runtime)
         self.assertIn("def leftover_missing_class_type", runtime)
         self.assertIn("def leftover_wait_for_textures", runtime)
+        self.assertIn("def leftover_missing_policy_obs", runtime)
+        self.assertIn("def leftover_excess_obs_history", runtime)
+        self.assertIn("def leftover_invalid_action_scale", runtime)
+        self.assertIn("def leftover_missing_term_func", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -2549,6 +2638,10 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_missing_joint_pos_action", relaunch)
         self.assertIn("leftover_missing_class_type", relaunch)
         self.assertIn("leftover_wait_for_textures", relaunch)
+        self.assertIn("leftover_missing_policy_obs", relaunch)
+        self.assertIn("leftover_excess_obs_history", relaunch)
+        self.assertIn("leftover_invalid_action_scale", relaunch)
+        self.assertIn("leftover_missing_term_func", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)

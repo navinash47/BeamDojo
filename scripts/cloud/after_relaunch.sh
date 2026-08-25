@@ -203,6 +203,22 @@ if ! grep -q "def leftover_wait_for_textures" "$REPO/scripts/rsl_rl/beamdojo_run
   echo "beamdojo_runtime.py is missing leftover wait_for_textures drop. Pull ${REF} or Nucleus texture wait stalls gym.make before W&B." >&2
   exit 1
 fi
+if ! grep -q "def leftover_missing_policy_obs" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover observations.policy restore. Pull ${REF} or Hydra-nulled policy dies at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_excess_obs_history" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover obs-history clamp. Pull ${REF} or leftover RNN history_length OOMs 1024 envs at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_invalid_action_scale" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover action-scale restore. Pull ${REF} or joint_pos.scale=None TypeErrors at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_missing_term_func" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover func=None term drop. Pull ${REF} or manager terms call None at gym.make." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1
