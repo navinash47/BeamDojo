@@ -1810,6 +1810,8 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
                 type("R", (), {"spawn": type("Sp", (), {"rigid_props": type("P", (), {"kinematic_enabled": False})()})()})()
             )
         )
+        self.assertTrue(self.rt.leftover_missing_sim(type("C", (), {"sim": None})()))
+        self.assertFalse(self.rt.leftover_missing_sim(type("C", (), {"sim": object()})()))
         h1_act = type(
             "BeamDojoStage1EnvCfg",
             (),
@@ -2442,6 +2444,32 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertTrue(catcher_spawn.rigid_props.kinematic_enabled)
         self.assertTrue(catcher_spawn.rigid_props.disable_gravity)
 
+        missing_sim = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})(),
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "decimation": 4,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(missing_sim)
+        self.assertIsNotNone(missing_sim.sim)
+        self.assertEqual(missing_sim.sim.dt, 0.005)
+        self.assertEqual(missing_sim.sim.device, "cuda:0")
+        self.assertFalse(missing_sim.sim.wait_for_textures)
+
     def test_leftover_quad_and_full_usd_helpers(self):
         anymal = type(
             "Cfg",
@@ -2624,6 +2652,7 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_disabled_gravity_robot", runtime)
         self.assertIn("def leftover_fixed_root_robot", runtime)
         self.assertIn("def leftover_self_collisions_robot", runtime)
+        self.assertIn("def leftover_missing_sim", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -2708,6 +2737,7 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_missing_term_func", relaunch)
         self.assertIn("leftover_kinematic_robot", relaunch)
         self.assertIn("leftover_self_collisions_robot", relaunch)
+        self.assertIn("leftover_missing_sim", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)

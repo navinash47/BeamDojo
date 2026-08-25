@@ -764,6 +764,11 @@ def leftover_wait_for_textures(sim) -> bool:
     return getattr(sim, "wait_for_textures") is not False
 
 
+def leftover_missing_sim(env_cfg) -> bool:
+    """``env_cfg.sim is None`` dies in SimulationContext at gym.make."""
+    return env_cfg is not None and getattr(env_cfg, "sim", None) is None
+
+
 def leftover_missing_policy_obs(env_cfg) -> bool:
     """ObservationManager requires ``observations.policy`` at gym.make."""
     obs = getattr(env_cfg, "observations", None)
@@ -2189,6 +2194,24 @@ def _reassert_sim_timing(env_cfg) -> None:
         if ep_n <= 0:
             print("[WARN] Restoring leftover episode_length_s=20.")
             env_cfg.episode_length_s = 20.0
+    if leftover_missing_sim(env_cfg):
+        print("[WARN] Restoring leftover sim (SimulationCfg at gym.make).")
+        try:
+            from isaaclab.sim import SimulationCfg
+
+            env_cfg.sim = SimulationCfg(dt=0.005, device="cuda:0", render_interval=dec_n or 4)
+            env_cfg.sim.wait_for_textures = False
+        except ImportError:
+            env_cfg.sim = type(
+                "SimulationCfg",
+                (),
+                {
+                    "dt": 0.005,
+                    "device": "cuda:0",
+                    "render_interval": dec_n or 4,
+                    "wait_for_textures": False,
+                },
+            )()
     sim = getattr(env_cfg, "sim", None)
     if sim is None:
         return

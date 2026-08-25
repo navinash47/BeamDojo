@@ -227,6 +227,10 @@ if ! grep -q "def leftover_self_collisions_robot" "$REPO/scripts/rsl_rl/beamdojo
   echo "beamdojo_runtime.py is missing leftover self-collision drop. Pull ${REF} or enabled_self_collisions explodes PhysX at first reset." >&2
   exit 1
 fi
+if ! grep -q "def leftover_missing_sim" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover sim restore. Pull ${REF} or Hydra env_cfg.sim=None dies at gym.make." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1
