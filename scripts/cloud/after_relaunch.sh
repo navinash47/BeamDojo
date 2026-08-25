@@ -159,6 +159,18 @@ if ! grep -q "def leftover_unfiltered_collisions" "$REPO/scripts/rsl_rl/beamdojo
   echo "beamdojo_runtime.py is missing leftover filter_collisions restore. Pull ${REF} or 1024 clones collide at first reset." >&2
   exit 1
 fi
+if ! grep -q "def leftover_contact_filter_prims" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover ANYmal contact-filter drop. Pull ${REF} or leftover Terrain/LF_FOOT filters die at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_wrong_contact_prim" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover Robot/base contact prim restore. Pull ${REF} or ANYmal base finds 0 H1/G1 bodies." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_wrong_action_joint_names" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover ANYmal action-joint restore. Pull ${REF} or .*HAA resolves 0 actions at gym.make." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1

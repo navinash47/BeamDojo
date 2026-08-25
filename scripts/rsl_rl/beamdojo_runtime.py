@@ -617,6 +617,78 @@ def leftover_zero_num_envs(scene) -> bool:
         return True
 
 
+def leftover_invalid_env_spacing(scene) -> bool:
+    """``None`` / parent ``2.5`` overlaps 1024 H1s at gym.make. Play ``6.0`` stays."""
+    if scene is None or not hasattr(scene, "env_spacing"):
+        return False
+    try:
+        spacing = float(scene.env_spacing)
+    except (TypeError, ValueError):
+        return True
+    return spacing != spacing or spacing < 6.0
+
+
+def leftover_contact_filter_prims(contact) -> bool:
+    """ANYmal/Cassie leftover filters die at gym.make (PhysX count / one-to-many)."""
+    if contact is None:
+        return False
+    expr = (
+        contact.get("filter_prim_paths_expr")
+        if isinstance(contact, dict)
+        else getattr(contact, "filter_prim_paths_expr", None)
+    )
+    return any(str(item).strip() for item in names_as_list(expr))
+
+
+def leftover_wrong_contact_prim(path) -> bool:
+    """ANYmal leftover ``.../Robot/base`` / ``LF_FOOT`` finds 0 H1/G1 contact bodies."""
+    if path is None:
+        return False
+    text = str(path).strip()
+    if not text or leftover_uncloned_prim_path(text):
+        return False
+    normalized = text.replace("{ENV_NS}", "{ENV_REGEX_NS}")
+    if normalized == "{ENV_REGEX_NS}/Robot/.*":
+        return False
+    lower = text.lower()
+    if leftover_quadruped_joint_key(text):
+        return True
+    if re.search(r"/(?:base|lf_foot|rf_foot|lh_foot|rh_foot|fl_foot|fr_foot)(?:/|$)", lower):
+        return True
+    if "terrain" in lower or "*_foot" in lower or "/object" in lower:
+        return True
+    return "/robot/.*" not in lower
+
+
+def leftover_track_contact_points(contact) -> bool:
+    """Isaac 2.3.2 ValueErrors ``track_contact_points=True`` with an empty filter."""
+    if contact is None:
+        return False
+    flag = (
+        contact.get("track_contact_points")
+        if isinstance(contact, dict)
+        else getattr(contact, "track_contact_points", None)
+    )
+    return flag is True
+
+
+def leftover_zero_contact_data_count(contact) -> bool:
+    if contact is None:
+        return False
+    if isinstance(contact, dict):
+        if "max_contact_data_count_per_prim" not in contact:
+            return False
+        raw = contact.get("max_contact_data_count_per_prim")
+    elif not hasattr(contact, "max_contact_data_count_per_prim"):
+        return False
+    else:
+        raw = contact.max_contact_data_count_per_prim
+    try:
+        return int(raw) < 1
+    except (TypeError, ValueError):
+        return True
+
+
 def leftover_missing_scene_entity_term(term, present: set[str]) -> bool:
     """True when a manager term still looks up a scene entity Hydra leftover never spawned."""
     if term is None:
@@ -1223,6 +1295,30 @@ def leftover_wrong_robot_actuators(env_cfg) -> bool:
     return any(leftover_wrong_robot_actuator(act, env_cfg) for _, act in _actuator_items(actuators))
 
 
+def _action_joint_names(env_cfg):
+    joint_pos = getattr(getattr(env_cfg, "actions", None), "joint_pos", None)
+    if joint_pos is None:
+        return None, None
+    names = joint_pos.get("joint_names") if isinstance(joint_pos, dict) else getattr(joint_pos, "joint_names", None)
+    return joint_pos, names
+
+
+def leftover_wrong_action_joint_names(env_cfg) -> bool:
+    """ANYmal ``.*HAA`` / H1-on-G1 action names resolve 0 joints at gym.make."""
+    _, names = _action_joint_names(env_cfg)
+    if leftover_all_joints(names) or not names:
+        return False
+    return any(leftover_wrong_robot_joint_key(item, env_cfg) for item in names_as_list(names))
+
+
+def leftover_wrong_event_joint_names(term, env_cfg) -> bool:
+    """Leftover ``events.actuator_gains`` ``.*HAA`` ValueErrors EventManager at gym.make."""
+    names = _entity_joint_names(_term_entity_cfg(term, "asset_cfg"))
+    if leftover_all_joints(names) or not names:
+        return False
+    return any(leftover_wrong_robot_joint_key(item, env_cfg) for item in names_as_list(names))
+
+
 def _scene_uses_stones(scene) -> bool:
     return scene is not None and getattr(scene, "task_stone_0", None) is not None
 
@@ -1631,17 +1727,12 @@ def _reassert_pelvis_height(env_cfg, spec_name: str) -> None:
 
 
 def _reassert_env_spacing(env_cfg) -> None:
-    """Parent leftover ``env_spacing=2.5`` overlaps 1024 H1s at gym.make reset."""
+    """Parent leftover ``env_spacing=2.5`` / ``None`` overlaps 1024 H1s at gym.make."""
     scene = getattr(env_cfg, "scene", None)
-    if scene is None or not hasattr(scene, "env_spacing"):
+    if not leftover_invalid_env_spacing(scene):
         return
-    try:
-        spacing = float(scene.env_spacing)
-    except (TypeError, ValueError):
-        return
-    if spacing < 6.0:
-        print("[WARN] Restoring leftover env_spacing to 8.0 (parent 2.5 overlaps 1024 envs).")
-        scene.env_spacing = 8.0
+    print("[WARN] Restoring leftover env_spacing to 8.0 (parent 2.5 overlaps 1024 envs).")
+    scene.env_spacing = 8.0
 
 
 def _reassert_contact_history(env_cfg) -> None:
@@ -1660,6 +1751,35 @@ def _reassert_contact_history(env_cfg) -> None:
     if hasattr(contact, "track_air_time") and not contact.track_air_time:
         print("[WARN] Enabling leftover contact_forces.track_air_time.")
         contact.track_air_time = True
+
+
+def _set_contact_field(contact, name: str, value) -> None:
+    if contact is None:
+        return
+    if isinstance(contact, dict):
+        contact[name] = value
+        return
+    setattr(contact, name, value)
+
+
+def _reassert_contact_filters(env_cfg) -> None:
+    """Leftover ANYmal filters / ``Robot/base`` die at ContactSensor init — before W&B."""
+    contact = getattr(getattr(env_cfg, "scene", None), "contact_forces", None)
+    if contact is None:
+        return
+    if leftover_contact_filter_prims(contact):
+        print("[WARN] Clearing leftover contact_forces.filter_prim_paths_expr (PhysX filter count).")
+        _set_contact_field(contact, "filter_prim_paths_expr", [])
+    if leftover_track_contact_points(contact):
+        print("[WARN] Disabling leftover contact_forces.track_contact_points (needs a leftover filter).")
+        _set_contact_field(contact, "track_contact_points", False)
+    if leftover_zero_contact_data_count(contact):
+        print("[WARN] Restoring leftover contact_forces.max_contact_data_count_per_prim=4.")
+        _set_contact_field(contact, "max_contact_data_count_per_prim", 4)
+    path = contact.get("prim_path") if isinstance(contact, dict) else getattr(contact, "prim_path", None)
+    if leftover_wrong_contact_prim(path):
+        print(f"[WARN] Restoring leftover contact_forces.prim_path={path!r} to {{ENV_REGEX_NS}}/Robot/.*")
+        _set_contact_field(contact, "prim_path", "{ENV_REGEX_NS}/Robot/.*")
 
 
 def _reassert_sim_timing(env_cfg) -> None:
@@ -1946,13 +2066,23 @@ def _reassert_stage1_timeout_only(env_cfg) -> None:
             setattr(terms, name, None)
 
 
+def _set_action_joint_names(joint_pos, names) -> None:
+    if joint_pos is None:
+        return
+    if isinstance(joint_pos, dict):
+        joint_pos["joint_names"] = names
+    elif hasattr(joint_pos, "joint_names"):
+        joint_pos.joint_names = names
+
+
 def _reassert_g1_action_joints(env_cfg) -> None:
-    """Parent leftover ``joint_names=[".*"]`` puts G1 arms/fingers back in the action."""
+    """Parent leftover ``joint_names=[".*"]`` / H1 regexes put G1 arms back in the action."""
     if not _treat_as_g1(env_cfg):
         return
-    actions = getattr(env_cfg, "actions", None)
-    joint_pos = getattr(actions, "joint_pos", None)
-    if joint_pos is None or not leftover_all_joints(getattr(joint_pos, "joint_names", None)):
+    joint_pos, names = _action_joint_names(env_cfg)
+    if joint_pos is None:
+        return
+    if not leftover_all_joints(names) and not leftover_wrong_action_joint_names(env_cfg):
         return
     try:
         from h1_cfg.robot_spec import G1
@@ -1960,7 +2090,30 @@ def _reassert_g1_action_joints(env_cfg) -> None:
         print(f"[WARN] G1 action-joint reassert skipped ({type(exc).__name__}: {exc})")
         return
     print("[WARN] Restoring leftover G1 action joints off parent '.*' (paper: 12 lower-body).")
-    joint_pos.joint_names = list(G1.action_joints)
+    _set_action_joint_names(joint_pos, list(G1.action_joints))
+
+
+def _reassert_action_joint_names(env_cfg) -> None:
+    """H1 leftover ANYmal ``.*HAA`` / G1 ``*_joint`` names resolve 0 actions at gym.make."""
+    _reassert_g1_action_joints(env_cfg)
+    if _treat_as_g1(env_cfg) or not leftover_wrong_action_joint_names(env_cfg):
+        return
+    joint_pos, _ = _action_joint_names(env_cfg)
+    print("[WARN] Restoring leftover H1 action joints off ANYmal/G1 names.")
+    _set_action_joint_names(joint_pos, [".*"])
+
+
+def _reassert_event_joint_names(env_cfg) -> None:
+    """Leftover ``events.actuator_gains`` ANYmal joints ValueError at gym.make."""
+    events = getattr(env_cfg, "events", None)
+    if events is None:
+        return
+    for term_name in _public_field_names(events):
+        term = getattr(events, term_name, None)
+        if not leftover_wrong_event_joint_names(term, env_cfg):
+            continue
+        print(f"[WARN] Restoring leftover events.{term_name} joint_names to '.*'.")
+        _set_entity_joint_names(_term_entity_cfg(term, "asset_cfg"), [".*"])
 
 
 def _restore_entity_names(entity, kind: str, expected, label: str) -> None:
@@ -2313,15 +2466,17 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     _reassert_velocity_ranges(env_cfg)
     _reassert_anymal_body_names(env_cfg)
     _reassert_missing_scene_entity_terms(env_cfg)
-    _reassert_g1_action_joints(env_cfg)
+    _reassert_action_joint_names(env_cfg)
     _reassert_g1_joint_fullmatch(env_cfg)
     _drop_h1_leftover_fingers(env_cfg)
     _reassert_h1_joint_fullmatch(env_cfg)
     _reassert_official_reset_events(env_cfg)
+    _reassert_event_joint_names(env_cfg)
     _reassert_stage2_reset_on_beam(env_cfg)
     _reassert_stage1_timeout_only(env_cfg)
     _reassert_env_spacing(env_cfg)
     _reassert_contact_history(env_cfg)
+    _reassert_contact_filters(env_cfg)
     _reassert_sim_timing(env_cfg)
     _reassert_infinite_horizon(env_cfg)
     _reassert_physx_floors(env_cfg)

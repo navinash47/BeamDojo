@@ -1723,6 +1723,43 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
                 {"robot", "contact_forces", "terrain"},
             )
         )
+        self.assertTrue(self.rt.leftover_contact_filter_prims(type("C", (), {"filter_prim_paths_expr": ["{ENV_REGEX_NS}/Terrain"]})()))
+        self.assertFalse(self.rt.leftover_contact_filter_prims(type("C", (), {"filter_prim_paths_expr": []})()))
+        self.assertTrue(self.rt.leftover_wrong_contact_prim("{ENV_REGEX_NS}/Robot/base"))
+        self.assertTrue(self.rt.leftover_wrong_contact_prim("{ENV_REGEX_NS}/Robot/LF_FOOT"))
+        self.assertFalse(self.rt.leftover_wrong_contact_prim("{ENV_REGEX_NS}/Robot/.*"))
+        self.assertTrue(self.rt.leftover_track_contact_points(type("C", (), {"track_contact_points": True})()))
+        self.assertTrue(self.rt.leftover_zero_contact_data_count(type("C", (), {"max_contact_data_count_per_prim": 0})()))
+        self.assertTrue(self.rt.leftover_invalid_env_spacing(type("S", (), {"env_spacing": None})()))
+        self.assertTrue(self.rt.leftover_invalid_env_spacing(type("S", (), {"env_spacing": 2.5})()))
+        self.assertFalse(self.rt.leftover_invalid_env_spacing(type("S", (), {"env_spacing": 6.0})()))
+        h1_act = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type("S", (), {"robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})()})(),
+                "actions": type("A", (), {"joint_pos": type("J", (), {"joint_names": [".*HAA", ".*HFE"]})()})(),
+            },
+        )()
+        self.assertTrue(self.rt.leftover_wrong_action_joint_names(h1_act))
+        self.assertFalse(
+            self.rt.leftover_wrong_action_joint_names(
+                type(
+                    "BeamDojoStage1EnvCfg",
+                    (),
+                    {
+                        "scene": type("S", (), {"robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})()})(),
+                        "actions": type("A", (), {"joint_pos": type("J", (), {"joint_names": [".*"]})()})(),
+                    },
+                )()
+            )
+        )
+        self.assertTrue(
+            self.rt.leftover_wrong_event_joint_names(
+                type("T", (), {"params": {"asset_cfg": {"joint_names": [".*HAA"]}}})(),
+                h1_act,
+            )
+        )
 
     def test_leftover_stage_catcher_and_uncloned_prims(self):
         robot = type("R", (), {"prim_path": "/World/Robot", "usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})()
@@ -1976,6 +2013,116 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertTrue(props.collision_enabled)
         self.assertIsNone(cam_cfg.events.randomize_scanner)
 
+        contact = type(
+            "C",
+            (),
+            {
+                "prim_path": "{ENV_REGEX_NS}/Robot/base",
+                "filter_prim_paths_expr": ["{ENV_REGEX_NS}/Terrain", "{ENV_REGEX_NS}/Robot/LF_FOOT"],
+                "track_contact_points": True,
+                "max_contact_data_count_per_prim": 0,
+                "history_length": 3,
+                "track_air_time": True,
+            },
+        )()
+        joint_pos = type("J", (), {"joint_names": [".*HAA", ".*HFE", ".*KFE"]})()
+        gains = type("T", (), {"params": {"asset_cfg": type("E", (), {"joint_names": [".*HAA"]})()}})()
+        filter_cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "env_spacing": None,
+                        "robot": type(
+                            "R",
+                            (),
+                            {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"},
+                        )(),
+                        "contact_forces": contact,
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "actions": type("A", (), {"joint_pos": joint_pos})(),
+                "events": type("Ev", (), {"actuator_gains": gains})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(filter_cfg)
+        self.assertEqual(contact.filter_prim_paths_expr, [])
+        self.assertFalse(contact.track_contact_points)
+        self.assertEqual(contact.max_contact_data_count_per_prim, 4)
+        self.assertEqual(contact.prim_path, "{ENV_REGEX_NS}/Robot/.*")
+        self.assertEqual(joint_pos.joint_names, [".*"])
+        self.assertEqual(gains.params["asset_cfg"].joint_names, [".*"])
+        self.assertEqual(filter_cfg.scene.env_spacing, 8.0)
+
+        play_space = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "env_spacing": 6.0,
+                        "num_envs": 64,
+                        "robot": type(
+                            "R",
+                            (),
+                            {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"},
+                        )(),
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(play_space)
+        self.assertEqual(play_space.scene.env_spacing, 6.0)
+        self.assertEqual(play_space.scene.num_envs, 64)
+
+        from h1_cfg.robot_spec import G1
+
+        g1_joint_pos = type("J", (), {"joint_names": [".*_hip_yaw", ".*_hip_roll"]})()
+        g1_cfg = type(
+            "BeamDojoStage1G1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type(
+                            "R",
+                            (),
+                            {"usd_path": "/Isaac/Robots/Unitree/G1/g1_minimal.usd"},
+                        )(),
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "rewards": type("Rew", (), {"joint_deviation_fingers": object()})(),
+                "actions": type("A", (), {"joint_pos": g1_joint_pos})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(g1_cfg)
+        self.assertEqual(g1_joint_pos.joint_names, list(G1.action_joints))
+
     def test_leftover_quad_and_full_usd_helpers(self):
         anymal = type(
             "Cfg",
@@ -2139,6 +2286,9 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_invalid_root_rot", runtime)
         self.assertIn("def leftover_scene_camera_fields", runtime)
         self.assertIn("def leftover_unfiltered_collisions", runtime)
+        self.assertIn("def leftover_contact_filter_prims", runtime)
+        self.assertIn("def leftover_wrong_contact_prim", runtime)
+        self.assertIn("def leftover_wrong_action_joint_names", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -2206,6 +2356,9 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_invalid_root_rot", relaunch)
         self.assertIn("leftover_scene_camera_fields", relaunch)
         self.assertIn("leftover_unfiltered_collisions", relaunch)
+        self.assertIn("leftover_contact_filter_prims", relaunch)
+        self.assertIn("leftover_wrong_contact_prim", relaunch)
+        self.assertIn("leftover_wrong_action_joint_names", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)
