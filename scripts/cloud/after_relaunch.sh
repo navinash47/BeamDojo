@@ -227,6 +227,14 @@ if ! grep -q "def leftover_invalid_runner_interval" "$REPO/scripts/rsl_rl/beamdo
   echo "beamdojo_runtime.py is missing leftover num_steps_per_env=-1 restore. Pull ${REF} or OnPolicyRunner dies before wandb.init." >&2
   exit 1
 fi
+if ! grep -q "def leftover_missing_viewer" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover viewer restore. Pull ${REF} or ViewportCameraController dies at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_invalid_seed" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover seed drop. Pull ${REF} or seed='none' TypeErrors ManagerBasedEnv at gym.make." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_excess_obs_history" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover obs-history clamp. Pull ${REF} or leftover RNN history_length OOMs 1024 envs at gym.make." >&2
   exit 1

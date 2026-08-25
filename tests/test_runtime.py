@@ -1278,6 +1278,31 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertEqual(physx.gpu_max_num_partitions, 8)
         self.assertFalse(joint.debug_vis)
 
+    def test_reassert_restores_viewer_seed_and_num_rerenders(self):
+        viewer = type("V", (), {"eye": None, "lookat": (0.0, 0.0, 0.0), "origin_type": "asset_root"})()
+        cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "viewer": None,
+                "seed": "none",
+                "num_rerenders_on_reset": None,
+            },
+        )()
+        self.assertTrue(self.rt.leftover_missing_viewer(cfg))
+        self.assertTrue(self.rt.leftover_invalid_seed(cfg))
+        self.assertTrue(self.rt.leftover_invalid_num_rerenders(cfg))
+        self.assertTrue(self.rt.leftover_invalid_viewer(viewer))
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNotNone(cfg.viewer)
+        self.assertEqual(cfg.viewer.origin_type, "world")
+        self.assertIsNone(cfg.seed)
+        self.assertEqual(cfg.num_rerenders_on_reset, 0)
+
     def test_reassert_obs_history_none_concatenate_dim_and_physics_material(self):
         lin_vel = type("T", (), {"func": object(), "history_length": None, "scale": 2.0})()
         policy = type(
@@ -3049,6 +3074,10 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_incomplete_physx", runtime)
         self.assertIn("def leftover_enabled_action_debug_vis", runtime)
         self.assertIn("def leftover_invalid_runner_interval", runtime)
+        self.assertIn("def leftover_missing_viewer", runtime)
+        self.assertIn("def leftover_invalid_viewer", runtime)
+        self.assertIn("def leftover_invalid_seed", runtime)
+        self.assertIn("def leftover_invalid_num_rerenders", runtime)
         self.assertIn("def leftover_excess_obs_history", runtime)
         self.assertIn("def leftover_invalid_action_scale", runtime)
         self.assertIn("def leftover_missing_term_func", runtime)
@@ -3165,6 +3194,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_incomplete_physx", relaunch)
         self.assertIn("leftover_enabled_action_debug_vis", relaunch)
         self.assertIn("leftover_invalid_runner_interval", relaunch)
+        self.assertIn("leftover_missing_viewer", relaunch)
+        self.assertIn("leftover_invalid_seed", relaunch)
         self.assertIn("leftover_excess_obs_history", relaunch)
         self.assertIn("leftover_invalid_action_scale", relaunch)
         self.assertIn("leftover_missing_term_func", relaunch)

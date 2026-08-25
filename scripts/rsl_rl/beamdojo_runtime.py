@@ -1074,6 +1074,85 @@ def leftover_missing_scene(env_cfg) -> bool:
     return env_cfg is not None and getattr(env_cfg, "scene", None) is None
 
 
+def leftover_missing_viewer(env_cfg) -> bool:
+    """ViewportCameraController reads ``cfg.viewer.eye`` when render_mode is not fully headless."""
+    if env_cfg is None:
+        return False
+    if isinstance(env_cfg, dict):
+        if "viewer" not in env_cfg:
+            return False
+        return env_cfg.get("viewer") is None
+    if not hasattr(env_cfg, "viewer"):
+        return False
+    return getattr(env_cfg, "viewer") is None
+
+
+def leftover_invalid_viewer(viewer) -> bool:
+    """Leftover ``eye=None`` / ``origin_type=asset_root`` without asset_name ValueErrors at gym.make."""
+    if viewer is None:
+        return False
+    eye = viewer.get("eye") if isinstance(viewer, dict) else getattr(viewer, "eye", None)
+    lookat = viewer.get("lookat") if isinstance(viewer, dict) else getattr(viewer, "lookat", None)
+    for vec in (eye, lookat):
+        try:
+            x, y, z = float(vec[0]), float(vec[1]), float(vec[2])
+        except (TypeError, ValueError, IndexError, KeyError):
+            return True
+        if any(value != value for value in (x, y, z)):
+            return True
+    origin = viewer.get("origin_type") if isinstance(viewer, dict) else getattr(viewer, "origin_type", "world")
+    if origin is None:
+        return True
+    text = str(origin).strip().lower()
+    if text not in {"world", "env", "asset_root", "asset_body"}:
+        return True
+    if text in {"asset_root", "asset_body"}:
+        asset = viewer.get("asset_name") if isinstance(viewer, dict) else getattr(viewer, "asset_name", None)
+        if not asset:
+            return True
+    return False
+
+
+def leftover_invalid_seed(env_cfg) -> bool:
+    """``ManagerBasedEnv`` calls ``self.seed(cfg.seed)`` at gym.make. Leftover ``seed='none'`` dies."""
+    if env_cfg is None:
+        return False
+    if isinstance(env_cfg, dict):
+        if "seed" not in env_cfg:
+            return False
+        value = env_cfg.get("seed")
+    elif not hasattr(env_cfg, "seed"):
+        return False
+    else:
+        value = env_cfg.seed
+    if value is None:
+        return False
+    try:
+        int(value)
+    except (TypeError, ValueError):
+        return True
+    return False
+
+
+def leftover_invalid_num_rerenders(env_cfg) -> bool:
+    """Reset does ``num_rerenders_on_reset > 0``. Leftover None TypeErrors before W&B."""
+    if env_cfg is None:
+        return False
+    if isinstance(env_cfg, dict):
+        if "num_rerenders_on_reset" not in env_cfg:
+            return False
+        value = env_cfg.get("num_rerenders_on_reset")
+    elif not hasattr(env_cfg, "num_rerenders_on_reset"):
+        return False
+    else:
+        value = env_cfg.num_rerenders_on_reset
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return True
+    return number < 0
+
+
 def leftover_missing_reset_base(env_cfg) -> bool:
     """No ``reset_base`` leaves the H1 in the plane; PhysX NaNs at first reset."""
     events = getattr(env_cfg, "events", None) if env_cfg is not None else None
@@ -3592,6 +3671,52 @@ def _reassert_infinite_horizon(env_cfg) -> None:
         env_cfg.is_finite_horizon = False
 
 
+def _viewer_stub():
+    return type(
+        "ViewerCfg",
+        (),
+        {
+            "eye": (7.5, 7.5, 7.5),
+            "lookat": (0.0, 0.0, 0.0),
+            "cam_prim_path": "/OmniverseKit_Persp",
+            "resolution": (1280, 720),
+            "origin_type": "world",
+            "env_index": 0,
+            "asset_name": None,
+            "body_name": None,
+        },
+    )()
+
+
+def _reassert_viewer_seed(env_cfg) -> None:
+    """Leftover ``viewer=None`` / ``seed='none'`` / ``num_rerenders=None`` die at gym.make or first reset."""
+    viewer = getattr(env_cfg, "viewer", None)
+    if leftover_missing_viewer(env_cfg) or leftover_invalid_viewer(viewer):
+        print("[WARN] Restoring leftover env_cfg.viewer (ViewportCameraController at gym.make).")
+        try:
+            from isaaclab.envs.common import ViewerCfg
+
+            restored = ViewerCfg()
+        except ImportError:
+            restored = _viewer_stub()
+        if isinstance(env_cfg, dict):
+            env_cfg["viewer"] = restored
+        else:
+            env_cfg.viewer = restored
+    if leftover_invalid_seed(env_cfg):
+        print(f"[WARN] Clearing leftover env_cfg.seed={getattr(env_cfg, 'seed', None)!r}.")
+        if isinstance(env_cfg, dict):
+            env_cfg["seed"] = None
+        else:
+            env_cfg.seed = None
+    if leftover_invalid_num_rerenders(env_cfg):
+        print("[WARN] Restoring leftover num_rerenders_on_reset=0.")
+        if isinstance(env_cfg, dict):
+            env_cfg["num_rerenders_on_reset"] = 0
+        else:
+            env_cfg.num_rerenders_on_reset = 0
+
+
 def _reassert_stage2_reset_on_beam(env_cfg) -> None:
     """Parent leftover ``y=(-0.5, 0.5)`` / ``yaw=±π`` spawns beside a 20 cm beam."""
     if env_cfg_stage(env_cfg) != 2:
@@ -3775,6 +3900,7 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     _reassert_contact_history(env_cfg)
     _reassert_contact_filters(env_cfg)
     _reassert_sim_timing(env_cfg)
+    _reassert_viewer_seed(env_cfg)
     _reassert_infinite_horizon(env_cfg)
     _reassert_physx_floors(env_cfg)
 
