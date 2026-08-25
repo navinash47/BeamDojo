@@ -441,6 +441,7 @@ QUAD_ROBOT_MARKERS = (
     "aliengo",
 )
 BEAM_TOP_Z = 0.28  # BEAM_CENTER_Z + BEAM_THICKNESS/2; scene_props imports Isaac.
+BEAMDOJO_STONE_COUNT = 24
 
 
 def leftover_quadruped_robot(env_cfg) -> bool:
@@ -496,9 +497,76 @@ def leftover_uncloned_prim_path(path) -> bool:
 
 def leftover_asset_base_task_beam(beam) -> bool:
     """AssetBase cuboids are not in rigid-object views; Stage 2 falls through at first reset."""
-    if beam is None:
+    return leftover_asset_base_rigid(beam)
+
+
+def leftover_asset_base_rigid(asset) -> bool:
+    if asset is None:
         return False
-    return "AssetBase" in type(beam).__name__
+    return "AssetBase" in type(asset).__name__
+
+
+def _asset_spawn(asset):
+    if asset is None:
+        return None
+    if isinstance(asset, dict):
+        return asset.get("spawn")
+    return getattr(asset, "spawn", None)
+
+
+def leftover_disabled_collision_asset(asset) -> bool:
+    """Stage 1 visual leftover ``collision_enabled=False`` falls through Stage 2 at reset."""
+    spawn = _asset_spawn(asset)
+    if spawn is None:
+        return False
+    props = spawn.get("collision_props") if isinstance(spawn, dict) else getattr(spawn, "collision_props", None)
+    flag = None
+    if isinstance(props, dict):
+        flag = props.get("collision_enabled")
+    elif props is not None:
+        flag = getattr(props, "collision_enabled", None)
+    if flag is None:
+        flag = spawn.get("collision_enabled") if isinstance(spawn, dict) else getattr(spawn, "collision_enabled", None)
+    return flag is False
+
+
+def leftover_invalid_root_rot(rot) -> bool:
+    """Zero / NaN / non-4-tuple quats NaN PhysX at the first reset — before W&B."""
+    if rot is None:
+        return False
+    try:
+        vals = [float(rot[i]) for i in range(4)]
+    except (TypeError, ValueError, IndexError, KeyError):
+        return True
+    if any(value != value for value in vals):
+        return True
+    return sum(value * value for value in vals) ** 0.5 < 1e-3
+
+
+def leftover_nucleus_path(value) -> bool:
+    if value is None or isinstance(value, (int, float, bool)):
+        return False
+    text = str(value).strip().lower()
+    if not text:
+        return False
+    return (
+        text.startswith("omniverse://")
+        or "/nvidia/" in text
+        or "nucleus" in text
+        or text.endswith(".mdl")
+    )
+
+
+def leftover_nucleus_visual_material(mat) -> bool:
+    if mat is None:
+        return False
+    if leftover_nucleus_path(mat):
+        return True
+    for key in ("mdl_path", "texture_file", "usd_path", "mdl"):
+        raw = mat.get(key) if isinstance(mat, dict) else getattr(mat, key, None)
+        if leftover_nucleus_path(raw):
+            return True
+    return False
 
 
 def leftover_disabled_replicate_physics(scene) -> bool:
@@ -1095,6 +1163,19 @@ def _scene_uses_stones(scene) -> bool:
     return scene is not None and getattr(scene, "task_stone_0", None) is not None
 
 
+def env_cfg_uses_stones(env_cfg) -> bool:
+    """Stones from the env class. Leftover ``task_stone_0`` is not the only signal.
+
+    Hydra can drop every stone from ``BeamDojoStage2StonesEnvCfg`` (then a leftover
+    beam is restored and the 10k is not stones) or leave AssetBase pads that fall
+    through at wrapper reset — before W&B.
+    """
+    name = type(env_cfg).__name__.lower()
+    if re.search(r"stone", name):
+        return True
+    return _scene_uses_stones(getattr(env_cfg, "scene", None))
+
+
 def _reassert_physx_floors(env_cfg) -> None:
     """Parent locomotion leftover is ``10 * 2**15`` patches — too small for cloned beams."""
     try:
@@ -1104,7 +1185,7 @@ def _reassert_physx_floors(env_cfg) -> None:
         return
     scene = getattr(env_cfg, "scene", None)
     try:
-        apply_physx_gpu_capacity(env_cfg, stones=_scene_uses_stones(scene))
+        apply_physx_gpu_capacity(env_cfg, stones=env_cfg_uses_stones(env_cfg))
     except Exception as exc:
         print(f"[WARN] PhysX floor reassert skipped ({type(exc).__name__}: {exc})")
     physx = getattr(getattr(env_cfg, "sim", None), "physx", None)
@@ -1570,28 +1651,97 @@ def _task_beam_stub():
     return type("RigidObjectCfg", (), {"prim_path": "{ENV_REGEX_NS}/TaskBeam"})()
 
 
+def _stone_stub(index: int):
+    return type("RigidObjectCfg", (), {"prim_path": f"{{ENV_REGEX_NS}}/TaskStone{index}"})()
+
+
+def leftover_unusable_task_rigid(asset) -> bool:
+    return leftover_asset_base_rigid(asset) or leftover_disabled_collision_asset(asset)
+
+
 def _reassert_stage_task_beam(env_cfg) -> None:
-    """Leftover Stage 2 AssetBase beam falls through at wrapper reset — before W&B."""
+    """Leftover Stage 2 AssetBase / visual-only beam falls through at wrapper reset."""
     scene = getattr(env_cfg, "scene", None)
     if scene is None:
         return
     beam = getattr(scene, "task_beam", None)
-    if _scene_uses_stones(scene):
+    if env_cfg_uses_stones(env_cfg):
         if beam is not None:
             print("[WARN] Clearing leftover scene.task_beam (Stage 2 stones has no beam).")
             scene.task_beam = None
         return
     if env_cfg_stage(env_cfg) != 2:
         return
-    if beam is not None and not leftover_asset_base_task_beam(beam):
+    if beam is not None and not leftover_unusable_task_rigid(beam):
         return
-    print("[WARN] Restoring leftover Stage 2 task_beam to cloned RigidObjectCfg.")
+    print("[WARN] Restoring leftover Stage 2 task_beam to cloned colliding RigidObjectCfg.")
     try:
         from h1_cfg.scene_props import task_beam_cfg
 
         scene.task_beam = task_beam_cfg(collision=True)
     except ImportError:
         scene.task_beam = _task_beam_stub()
+
+
+def _reassert_stage_stones(env_cfg) -> None:
+    """Leftover missing / AssetBase / visual stones fall through at first reset."""
+    if not env_cfg_uses_stones(env_cfg):
+        return
+    scene = getattr(env_cfg, "scene", None)
+    if scene is None:
+        return
+    for index in range(BEAMDOJO_STONE_COUNT):
+        name = f"task_stone_{index}"
+        stone = getattr(scene, name, None)
+        if stone is not None and not leftover_unusable_task_rigid(stone):
+            continue
+        print(f"[WARN] Restoring leftover {name} to cloned colliding RigidObjectCfg.")
+        try:
+            from h1_cfg.scene_props import stone_cfg
+
+            setattr(scene, name, stone_cfg(index, collision=True))
+        except ImportError:
+            setattr(scene, name, _stone_stub(index))
+
+
+def _reassert_init_root_rot(env_cfg) -> None:
+    """Leftover ``rot=(0,0,0,0)`` NaNs PhysX at wrapper reset — before W&B."""
+    state = _robot_init_state(env_cfg)
+    if state is None:
+        return
+    rot = state.get("rot") if isinstance(state, dict) else getattr(state, "rot", None)
+    if not leftover_invalid_root_rot(rot):
+        return
+    print(f"[WARN] Restoring leftover robot.init_state.rot={rot!r} to identity.")
+    if isinstance(state, dict):
+        state["rot"] = (1.0, 0.0, 0.0, 0.0)
+    elif hasattr(state, "rot"):
+        state.rot = (1.0, 0.0, 0.0, 0.0)
+
+
+def _clear_nucleus_visual_material(asset, label: str) -> None:
+    spawn = _asset_spawn(asset)
+    target = spawn if spawn is not None else asset
+    if target is None:
+        return
+    mat = target.get("visual_material") if isinstance(target, dict) else getattr(target, "visual_material", None)
+    if not leftover_nucleus_visual_material(mat):
+        return
+    print(f"[WARN] Clearing leftover Nucleus {label} visual_material so gym.make does not hang.")
+    if isinstance(target, dict):
+        target["visual_material"] = None
+    elif hasattr(target, "visual_material"):
+        target.visual_material = None
+
+
+def _reassert_nucleus_visual_materials(env_cfg) -> None:
+    scene = getattr(env_cfg, "scene", None)
+    if scene is None:
+        return
+    _clear_nucleus_visual_material(getattr(scene, "robot", None), "robot.spawn")
+    _clear_nucleus_visual_material(getattr(scene, "task_beam", None), "task_beam.spawn")
+    for index in range(BEAMDOJO_STONE_COUNT):
+        _clear_nucleus_visual_material(getattr(scene, f"task_stone_{index}", None), f"task_stone_{index}.spawn")
 
 
 def _reassert_replicate_physics(env_cfg) -> None:
@@ -2019,11 +2169,14 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
 
     _reassert_stage_catcher(env_cfg)
     _reassert_stage_task_beam(env_cfg)
+    _reassert_stage_stones(env_cfg)
     _reassert_replicate_physics(env_cfg)
     _reassert_clone_prim_paths(env_cfg)
     _reassert_unitree_robot(env_cfg)
     _drop_leftover_actuators(env_cfg)
     _reassert_init_joint_state(env_cfg)
+    _reassert_init_root_rot(env_cfg)
+    _reassert_nucleus_visual_materials(env_cfg)
     _reassert_action_joint_maps(env_cfg)
     _reassert_contact_sensors(env_cfg)
     _reassert_velocity_ranges(env_cfg)

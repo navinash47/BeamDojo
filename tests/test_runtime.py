@@ -1681,6 +1681,32 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertFalse(
             self.rt.leftover_disabled_replicate_physics(type("S", (), {"replicate_physics": True})())
         )
+        self.assertTrue(self.rt.env_cfg_uses_stones(type("BeamDojoStage2StonesEnvCfg", (), {"scene": None})()))
+        self.assertFalse(
+            self.rt.env_cfg_uses_stones(
+                type("BeamDojoStage2EnvCfg", (), {"scene": type("S", (), {"task_stone_0": None})()})()
+            )
+        )
+        nocol = type(
+            "RigidObjectCfg",
+            (),
+            {"spawn": type("Sp", (), {"collision_props": type("P", (), {"collision_enabled": False})()})()},
+        )()
+        self.assertTrue(self.rt.leftover_disabled_collision_asset(nocol))
+        self.assertFalse(
+            self.rt.leftover_disabled_collision_asset(
+                type(
+                    "RigidObjectCfg",
+                    (),
+                    {"spawn": type("Sp", (), {"collision_props": type("P", (), {"collision_enabled": True})()})()},
+                )()
+            )
+        )
+        self.assertTrue(self.rt.leftover_invalid_root_rot((0.0, 0.0, 0.0, 0.0)))
+        self.assertTrue(self.rt.leftover_invalid_root_rot((1.0, 0.0)))
+        self.assertFalse(self.rt.leftover_invalid_root_rot((1.0, 0.0, 0.0, 0.0)))
+        self.assertTrue(self.rt.leftover_nucleus_path("omniverse://nucleus/Materials/foo.mdl"))
+        self.assertFalse(self.rt.leftover_nucleus_path("/Isaac/Robots/Unitree/H1/h1_minimal.usd"))
 
     def test_leftover_stage_catcher_and_uncloned_prims(self):
         robot = type("R", (), {"prim_path": "/World/Robot", "usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})()
@@ -1805,6 +1831,96 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         )()
         self.rt.reassert_gpu_env_cfg(stones)
         self.assertIsNone(stones.scene.task_beam)
+
+        visual = type(
+            "RigidObjectCfg",
+            (),
+            {
+                "prim_path": "{ENV_REGEX_NS}/TaskBeam",
+                "spawn": type("Sp", (), {"collision_props": type("P", (), {"collision_enabled": False})()})(),
+            },
+        )()
+        visual_cfg = type(
+            "BeamDojoStage2EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "task_beam": visual,
+                        "task_stone_0": None,
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(visual_cfg)
+        self.assertIsNot(visual_cfg.scene.task_beam, visual)
+        self.assertIn("RigidObject", type(visual_cfg.scene.task_beam).__name__)
+
+        missing_stones = type(
+            "BeamDojoStage2StonesEnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "task_beam": visual,
+                        "task_stone_0": None,
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(missing_stones)
+        self.assertIsNone(missing_stones.scene.task_beam)
+        self.assertTrue(self.rt.env_cfg_uses_stones(missing_stones))
+        for index in range(24):
+            stone = getattr(missing_stones.scene, f"task_stone_{index}")
+            self.assertIsNotNone(stone)
+            self.assertIn("RigidObject", type(stone).__name__)
+
+        rot_state = type("S", (), {"pos": (0.0, 0.0, 1.05), "rot": (0.0, 0.0, 0.0, 0.0)})()
+        mat = type("M", (), {"mdl_path": "omniverse://nucleus/Materials/foo.mdl"})()
+        spawn = type("Sp", (), {"visual_material": mat, "activate_contact_sensors": True})()
+        rot_robot = type(
+            "R",
+            (),
+            {
+                "usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd",
+                "init_state": rot_state,
+                "spawn": spawn,
+            },
+        )()
+        rot_cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": None, "robot": rot_robot},
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(rot_cfg)
+        self.assertEqual(rot_state.rot, (1.0, 0.0, 0.0, 0.0))
+        self.assertIsNone(spawn.visual_material)
 
     def test_leftover_quad_and_full_usd_helpers(self):
         anymal = type(
@@ -1964,6 +2080,9 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_wrong_robot_actuator", runtime)
         self.assertIn("def leftover_asset_base_task_beam", runtime)
         self.assertIn("def leftover_disabled_replicate_physics", runtime)
+        self.assertIn("def env_cfg_uses_stones", runtime)
+        self.assertIn("def leftover_disabled_collision_asset", runtime)
+        self.assertIn("def leftover_invalid_root_rot", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -2026,6 +2145,9 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_wrong_robot_actuator", relaunch)
         self.assertIn("leftover_asset_base_task_beam", relaunch)
         self.assertIn("leftover_disabled_replicate_physics", relaunch)
+        self.assertIn("env_cfg_uses_stones", relaunch)
+        self.assertIn("leftover_disabled_collision_asset", relaunch)
+        self.assertIn("leftover_invalid_root_rot", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)

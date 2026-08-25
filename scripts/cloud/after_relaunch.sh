@@ -139,6 +139,18 @@ if ! grep -q "def leftover_disabled_replicate_physics" "$REPO/scripts/rsl_rl/bea
   echo "beamdojo_runtime.py is missing leftover replicate_physics restore. Pull ${REF} or False hangs 1024-env clone before W&B." >&2
   exit 1
 fi
+if ! grep -q "def env_cfg_uses_stones" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing env_cfg_uses_stones. Pull ${REF} or a leftover Stones env without pads restores a beam and falls through." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_disabled_collision_asset" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover visual-beam collision restore. Pull ${REF} or Stage 1 collision=False falls through Stage 2 at reset." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_invalid_root_rot" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover root quat restore. Pull ${REF} or rot=(0,0,0,0) NaNs PhysX at first reset." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1
