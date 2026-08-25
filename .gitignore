@@ -8,6 +8,7 @@ scripts/cloud/lambda.host.env
 logs/
 videos/
 wandb/
+tracking/training-status.json
 *.pt
 *.pth
 *.ckpt

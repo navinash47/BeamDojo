@@ -1,0 +1,3339 @@
+"""Tests for gym ids, task routing, W&B URL, and training-status writer."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+_REPO = Path(__file__).resolve().parents[1]
+
+
+def _load_runtime():
+    path = _REPO / "scripts" / "rsl_rl" / "beamdojo_runtime.py"
+    spec = importlib.util.spec_from_file_location("beamdojo_runtime_under_test", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TaskRoutingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.rt = _load_runtime()
+
+    def test_stage1_h1(self):
+        self.assertEqual(self.rt.resolve_task(1, "h1"), "Isaac-BeamDojo-Stage1-H1-v0")
+
+    def test_stage2_h1_stones_play(self):
+        self.assertEqual(
+            self.rt.resolve_task(2, "h1", "stones", play=True),
+            "Isaac-BeamDojo-Stage2-H1-Stones-Play-v0",
+        )
+
+    def test_g1_stage2(self):
+        self.assertEqual(self.rt.resolve_task(2, "g1"), "Isaac-BeamDojo-Stage2-G1-v0")
+
+    def test_g1_stage2_stones(self):
+        self.assertEqual(
+            self.rt.resolve_task(2, "g1", "stones"),
+            "Isaac-BeamDojo-Stage2-G1-Stones-v0",
+        )
+
+    def test_unknown_combo(self):
+        with self.assertRaises(ValueError):
+            self.rt.resolve_task(1, "h1", "stones")
+
+    def test_experiment_name(self):
+        self.assertEqual(self.rt.experiment_name(2, "g1"), "beamdojo_g1_stage2")
+
+    def test_stage2_resume_defaults_to_stage1_experiment(self):
+        self.assertEqual(self.rt.resolve_load_experiment(2, "h1"), "beamdojo_h1_stage1")
+        self.assertEqual(self.rt.resolve_load_experiment(2, "g1"), "beamdojo_g1_stage1")
+        self.assertEqual(self.rt.resolve_load_experiment(1, "h1"), "beamdojo_h1_stage1")
+
+    def test_load_experiment_override(self):
+        self.assertEqual(
+            self.rt.resolve_load_experiment(2, "h1", load_experiment="beamdojo_h1_stage2"),
+            "beamdojo_h1_stage2",
+        )
+        with mock.patch.dict(os.environ, {"LOAD_EXPERIMENT": "beamdojo_h1_stage2"}, clear=False):
+            self.assertEqual(self.rt.resolve_load_experiment(2, "h1"), "beamdojo_h1_stage2")
+
+    def test_stage2_fine_tunes_stage1_flag(self):
+        self.assertTrue(self.rt.stage2_fine_tunes_stage1(2, "h1"))
+        self.assertTrue(self.rt.stage2_fine_tunes_stage1(2, "g1"))
+        self.assertFalse(self.rt.stage2_fine_tunes_stage1(1, "h1"))
+        self.assertFalse(
+            self.rt.stage2_fine_tunes_stage1(2, "h1", load_experiment="beamdojo_h1_stage2")
+        )
+
+    def test_remaining_iters_stop_at_configured_max(self):
+        self.assertEqual(self.rt.remaining_learning_iterations(0, 10_000), 10_000)
+        self.assertEqual(self.rt.remaining_learning_iterations(500, 10_000), 9_500)
+        self.assertEqual(self.rt.remaining_learning_iterations(10_000, 10_000), 0)
+        self.assertEqual(self.rt.remaining_learning_iterations(None, 10_000), 10_000)
+
+    def test_resume_picks_highest_iteration_not_missing_9999(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp) / "2026-08-24_12-00-00"
+            run.mkdir()
+            (run / "model_0.pt").write_text("a")
+            (run / "model_4.pt").write_text("b")
+            (run / "model_10.pt").write_text("c")
+            path = self.rt.resolve_resume_checkpoint(tmp)
+        self.assertTrue(path.endswith("model_10.pt"))
+
+    def test_resume_pinned_missing_9999_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp) / "smoke"
+            run.mkdir()
+            (run / "model_4.pt").write_text("b")
+            with self.assertRaises(ValueError):
+                self.rt.resolve_resume_checkpoint(tmp, None, "model_9999.pt")
+
+    def test_resume_picks_newer_run_by_mtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = Path(tmp) / "2026-08-01_00-00-00"
+            new = Path(tmp) / "2026-08-24_12-00-00"
+            old.mkdir()
+            new.mkdir()
+            (old / "model_9999.pt").write_text("old")
+            (new / "model_4.pt").write_text("new")
+            os.utime(old, (1, 1))
+            os.utime(new, (2_000_000_000, 2_000_000_000))
+            path = self.rt.resolve_resume_checkpoint(tmp)
+        self.assertTrue(path.endswith("model_4.pt"))
+        self.assertIn("2026-08-24_12-00-00", path)
+
+    def test_play_prefers_stage2_checkpoint_when_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s1 = Path(tmp) / "rsl_rl" / "beamdojo_h1_stage1" / "run1"
+            s2 = Path(tmp) / "rsl_rl" / "beamdojo_h1_stage2" / "run2"
+            s1.mkdir(parents=True)
+            s2.mkdir(parents=True)
+            (s1 / "model_4.pt").write_text("s1")
+            (s2 / "model_99.pt").write_text("s2")
+            with mock.patch.dict(os.environ, {"BEAMDOJO_LOG_ROOT": tmp, "LOAD_EXPERIMENT": ""}, clear=False):
+                path = self.rt.pick_play_checkpoint(2, "h1")
+        self.assertTrue(path.endswith("model_99.pt"))
+
+    def test_play_falls_back_to_stage1_when_stage2_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s1 = Path(tmp) / "rsl_rl" / "beamdojo_h1_stage1" / "run1"
+            s1.mkdir(parents=True)
+            (s1 / "model_4.pt").write_text("s1")
+            with mock.patch.dict(os.environ, {"BEAMDOJO_LOG_ROOT": tmp, "LOAD_EXPERIMENT": ""}, clear=False):
+                path = self.rt.pick_play_checkpoint(2, "h1")
+        self.assertTrue(path.endswith("model_4.pt"))
+        self.assertIn("beamdojo_h1_stage1", path)
+
+
+class WandbUrlTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.rt = _load_runtime()
+
+    def test_anonymous_project(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(self.rt.wandb_project_url("beamdojo"), "https://wandb.ai")
+
+    def test_entity_project(self):
+        with mock.patch.dict(os.environ, {"WANDB_ENTITY": "avinash"}, clear=True):
+            self.assertEqual(
+                self.rt.wandb_project_url("beamdojo"),
+                "https://wandb.ai/avinash/beamdojo",
+            )
+
+    def test_live_url_prefers_wandb_run(self):
+        fake = mock.MagicMock()
+        fake.run = mock.MagicMock()
+        fake.run.url = "https://wandb.ai/avinash/beamdojo/runs/abc123"
+        with mock.patch.dict("sys.modules", {"wandb": fake}):
+            self.assertEqual(
+                self.rt.live_wandb_url("beamdojo"),
+                "https://wandb.ai/avinash/beamdojo/runs/abc123",
+            )
+
+    def test_live_url_falls_back_without_run(self):
+        with mock.patch.dict(os.environ, {"WANDB_ENTITY": "lab"}, clear=True):
+            self.assertEqual(self.rt.live_wandb_url("beamdojo"), "https://wandb.ai/lab/beamdojo")
+
+    def test_sync_wandb_copies_entity_to_username(self):
+        with mock.patch.dict(os.environ, {"WANDB_ENTITY": "lab"}, clear=True):
+            self.rt.sync_wandb_identity_env()
+            self.assertEqual(os.environ["WANDB_USERNAME"], "lab")
+
+    def test_sync_wandb_unsets_blank_username(self):
+        with mock.patch.dict(os.environ, {"WANDB_USERNAME": "  "}, clear=True):
+            self.rt.sync_wandb_identity_env()
+            self.assertNotIn("WANDB_USERNAME", os.environ)
+
+    def test_sync_wandb_prefers_entity_over_username(self):
+        with mock.patch.dict(os.environ, {"WANDB_ENTITY": "team", "WANDB_USERNAME": "user"}, clear=True):
+            self.rt.sync_wandb_identity_env()
+            self.assertEqual(os.environ["WANDB_USERNAME"], "team")
+
+    def test_sync_wandb_defaults_project(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.rt.sync_wandb_identity_env()
+            self.assertEqual(os.environ["WANDB_PROJECT"], "beamdojo")
+
+    def test_live_identity_reads_entity_from_run(self):
+        fake = mock.MagicMock()
+        fake.run = mock.MagicMock()
+        fake.run.url = "https://wandb.ai/fromrun/beamdojo/runs/xyz"
+        fake.run.entity = "fromrun"
+        fake.run.project = "beamdojo"
+        with mock.patch.dict("sys.modules", {"wandb": fake}):
+            url, entity, project = self.rt.live_wandb_identity("other")
+        self.assertEqual(url, "https://wandb.ai/fromrun/beamdojo/runs/xyz")
+        self.assertEqual(entity, "fromrun")
+        self.assertEqual(project, "beamdojo")
+
+
+class TrainingStatusTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.rt = _load_runtime()
+
+    def test_write_roundtrip(self):
+        rt = self.rt
+        with tempfile.TemporaryDirectory() as tmp:
+            tracking = Path(tmp) / "tracking"
+            tracking.mkdir()
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo", "WANDB_ENTITY": "x"}, clear=True):
+                    path = rt.write_training_status({"status": "idle", "note": "unit test"})
+            data = json.loads(path.read_text())
+            self.assertEqual(data["status"], "idle")
+            self.assertEqual(data["wandb_url"], "https://wandb.ai/x/beamdojo")
+            self.assertIn("updated", data)
+
+    def test_write_boot_status_is_unknown_not_running(self):
+        rt = self.rt
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo", "WANDB_API_KEY": "k"}, clear=True):
+                    path = rt.write_boot_status(stage=1, robot="h1", terrain="beam")
+            data = json.loads(path.read_text())
+        self.assertEqual(data["status"], "unknown")
+        self.assertEqual(data["task"], "Isaac-BeamDojo-Stage1-H1-v0")
+        self.assertEqual(data["logger"], "wandb")
+        self.assertIn("Not a live W&B run yet", data["note"])
+        self.assertNotEqual(data["status"], "running")
+
+    def test_clear_stale_distributed_env_unsets_world_size(self):
+        with mock.patch.dict(os.environ, {"WORLD_SIZE": "8", "RANK": "0", "LOCAL_RANK": "0"}, clear=False):
+            cleared = self.rt.clear_stale_distributed_env(distributed=False)
+            self.assertIn("WORLD_SIZE", cleared)
+            self.assertNotIn("WORLD_SIZE", os.environ)
+            self.assertNotIn("RANK", os.environ)
+
+    def test_clear_stale_distributed_env_keeps_single_process(self):
+        with mock.patch.dict(os.environ, {"WORLD_SIZE": "1"}, clear=False):
+            self.assertEqual(self.rt.clear_stale_distributed_env(distributed=False), [])
+            self.assertEqual(os.environ["WORLD_SIZE"], "1")
+
+    def test_clear_stale_distributed_env_respects_flag(self):
+        with mock.patch.dict(os.environ, {"WORLD_SIZE": "2", "RANK": "1"}, clear=False):
+            self.assertEqual(self.rt.clear_stale_distributed_env(distributed=True), [])
+            self.assertEqual(os.environ["WORLD_SIZE"], "2")
+
+    def test_heartbeat_writes_every_n_iters(self):
+        rt = self.rt
+        logs = []
+
+        class Runner:
+            current_learning_iteration = 0
+
+            def log(self, locs):
+                logs.append(locs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo", "WANDB_ENTITY": "x"}, clear=True):
+                    runner = Runner()
+                    rt.attach_status_heartbeat(
+                        runner,
+                        {"wandb_project": "beamdojo", "log_dir": str(Path(tmp) / "run")},
+                        every=10,
+                    )
+                    runner.current_learning_iteration = 3
+                    runner.log({"it": 3})
+                    self.assertFalse((Path(tmp) / "tracking" / "training-status.json").exists())
+                    runner.current_learning_iteration = 10
+                    runner.log({"it": 10})
+                    data = json.loads((Path(tmp) / "tracking" / "training-status.json").read_text())
+        self.assertEqual(logs, [{"it": 3}, {"it": 10}])
+        self.assertEqual(data["status"], "running")
+        self.assertEqual(data["iteration"], 10)
+        self.assertEqual(data["wandb_url"], "https://wandb.ai/x/beamdojo")
+
+    def test_heartbeat_writes_live_metrics(self):
+        rt = self.rt
+        from collections import deque
+
+        class Runner:
+            current_learning_iteration = 10
+            num_steps_per_env = 24
+
+            def log(self, locs):
+                return locs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo", "WANDB_ENTITY": "x"}, clear=True):
+                    runner = Runner()
+                    payload = {"wandb_project": "beamdojo", "num_envs": 64, "num_steps_per_env": 24}
+                    rt.attach_status_heartbeat(runner, payload, every=10)
+                    runner.log(
+                        {
+                            "rewbuffer": deque([1.0, 3.0, 5.0]),
+                            "lenbuffer": deque([8.0, 12.0]),
+                            "loss_dict": {"value_function": 0.4, "foothold_value_function": 0.2},
+                            "collection_time": 1.0,
+                            "learn_time": 1.0,
+                            "collection_size": 200,
+                        }
+                    )
+                    data = json.loads((Path(tmp) / "tracking" / "training-status.json").read_text())
+        self.assertEqual(data["status"], "running")
+        self.assertAlmostEqual(data["mean_reward"], 3.0)
+        self.assertAlmostEqual(data["mean_episode_length"], 10.0)
+        self.assertAlmostEqual(data["value_loss"], 0.4)
+        self.assertAlmostEqual(data["foothold_value_loss"], 0.2)
+        self.assertAlmostEqual(data["fps"], 100.0)
+        self.assertEqual(data["history"][-1]["iteration"], 10)
+        self.assertAlmostEqual(data["history"][-1]["mean_reward"], 3.0)
+        self.assertNotIn("rewbuffer", data)
+
+    def test_prepare_logging_writer_writes_run_url(self):
+        rt = self.rt
+        fake = mock.MagicMock()
+        fake.run = mock.MagicMock()
+        fake.run.url = "https://wandb.ai/x/beamdojo/runs/live1"
+        fake.run.entity = "x"
+        fake.run.project = "beamdojo"
+
+        class Runner:
+            current_learning_iteration = 0
+
+            def log(self, locs):
+                return locs
+
+            def _prepare_logging_writer(self):
+                return "writer"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo"}, clear=True):
+                    with mock.patch.dict("sys.modules", {"wandb": fake}):
+                        runner = Runner()
+                        rt.attach_status_heartbeat(runner, {"wandb_project": "beamdojo"}, every=10)
+                        self.assertEqual(runner._prepare_logging_writer(), "writer")
+                        data = json.loads((Path(tmp) / "tracking" / "training-status.json").read_text())
+        self.assertEqual(data["status"], "running")
+        self.assertEqual(data["wandb_url"], "https://wandb.ai/x/beamdojo/runs/live1")
+        self.assertEqual(data["wandb_entity"], "x")
+        self.assertIn("W&B run URL", data["note"])
+
+    def test_prepare_falls_back_when_wandb_init_fails(self):
+        rt = self.rt
+        fake_writer = object()
+
+        class Runner:
+            current_learning_iteration = 0
+            writer = None
+            log_dir = None
+            logger_type = "wandb"
+
+            def log(self, locs):
+                return locs
+
+            def _prepare_logging_writer(self):
+                raise RuntimeError("wandb.init failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo"}, clear=True):
+                    runner = Runner()
+                    runner.log_dir = tmp
+                    with mock.patch.object(rt, "_fallback_tensorboard_writer", return_value=fake_writer) as fallback:
+                        rt.attach_status_heartbeat(runner, {"wandb_project": "beamdojo"}, every=10)
+                        self.assertIs(runner._prepare_logging_writer(), fake_writer)
+                        fallback.assert_called_once_with(runner)
+                    data = json.loads((Path(tmp) / "tracking" / "training-status.json").read_text())
+        self.assertEqual(data["status"], "running")
+        self.assertIn("TensorBoard", data["note"])
+        self.assertNotIn("/runs/", data.get("wandb_url") or "")
+
+    def test_prepare_keeps_writer_when_post_init_fails(self):
+        rt = self.rt
+        existing = object()
+
+        class Runner:
+            current_learning_iteration = 0
+            writer = existing
+            log_dir = None
+
+            def log(self, locs):
+                return locs
+
+            def _prepare_logging_writer(self):
+                raise RuntimeError("store_config failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo"}, clear=True):
+                    runner = Runner()
+                    rt.attach_status_heartbeat(runner, {"wandb_project": "beamdojo"}, every=10)
+                    with mock.patch.object(rt, "_fallback_tensorboard_writer") as fallback:
+                        self.assertIs(runner._prepare_logging_writer(), existing)
+                        fallback.assert_not_called()
+
+    def test_mark_training_idle(self):
+        rt = self.rt
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo"}, clear=True):
+                    path = rt.mark_training_idle("unit idle")
+            data = json.loads(path.read_text())
+        self.assertEqual(data["status"], "idle")
+        self.assertEqual(data["note"], "unit idle")
+
+    def test_status_write_skips_unwritable_extra_target(self):
+        rt = self.rt
+        with tempfile.TemporaryDirectory() as tmp:
+            blocked = Path(tmp) / "blocked"
+            blocked.write_text("not a directory")
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(
+                    os.environ,
+                    {"WANDB_PROJECT": "beamdojo", "BEAMDOJO_LOG_ROOT": str(blocked)},
+                    clear=True,
+                ):
+                    path = rt.write_training_status({"status": "idle", "note": "nfs skip"})
+            data = json.loads(path.read_text())
+        self.assertEqual(data["status"], "idle")
+        self.assertEqual(data["note"], "nfs skip")
+
+    def test_heartbeat_survives_status_write_error(self):
+        rt = self.rt
+
+        class Runner:
+            current_learning_iteration = 10
+
+            def log(self, locs):
+                return locs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo"}, clear=True):
+                    runner = Runner()
+                    rt.attach_status_heartbeat(runner, {"wandb_project": "beamdojo"}, every=10)
+                    with mock.patch.object(rt, "write_training_status", side_effect=OSError("nfs down")):
+                        self.assertEqual(runner.log({"it": 10, "rewbuffer": [1.0]}), {"it": 10, "rewbuffer": [1.0]})
+
+    def test_keep_wandb_call_swallows_http_errors(self):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("wandb.log 503")
+
+        self.assertIsNone(self.rt._keep_wandb_call("add_scalar", boom, 1))
+
+    def test_as_log_scalar_uses_item(self):
+        class Tensorish:
+            def item(self):
+                return 0.25
+
+        self.assertEqual(self.rt._as_log_scalar(Tensorish()), 0.25)
+        self.assertEqual(self.rt._as_log_scalar(3.5), 3.5)
+
+    def test_heartbeat_survives_log_error(self):
+        rt = self.rt
+
+        class Runner:
+            current_learning_iteration = 10
+
+            def log(self, locs):
+                raise RuntimeError("add_scalar 503")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(rt, "REPO_ROOT", Path(tmp)):
+                with mock.patch.dict(os.environ, {"WANDB_PROJECT": "beamdojo", "WANDB_ENTITY": "x"}, clear=True):
+                    runner = Runner()
+                    rt.attach_status_heartbeat(runner, {"wandb_project": "beamdojo"}, every=10)
+                    self.assertIsNone(runner.log({"it": 10, "rewbuffer": [2.0]}))
+                    data = json.loads((Path(tmp) / "tracking" / "training-status.json").read_text())
+        self.assertEqual(data["status"], "running")
+        self.assertAlmostEqual(data["mean_reward"], 2.0)
+
+    def test_save_survives_logger_upload_error(self):
+        rt = self.rt
+
+        class Runner:
+            def save(self, path, infos=None):
+                Path(path).write_bytes(b"ckpt")
+                raise RuntimeError("wandb.save 503")
+
+            def load(self, path, load_optimizer=True, map_location=None):
+                return {"ok": True}
+
+        rt._patch_runner_foot_optimizer(Runner)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "model_0.pt")
+            runner = Runner()
+            runner.alg = type("Alg", (), {"foot_optimizer": None})()
+            runner.save(path)
+            self.assertTrue(Path(path).is_file())
+
+    def test_save_survives_broken_foothold_splice(self):
+        rt = self.rt
+
+        class Foot:
+            def state_dict(self):
+                return {"x": 1}
+
+        class Runner:
+            def save(self, path, infos=None):
+                Path(path).write_bytes(b"not-a-pickle")
+
+            def load(self, path, load_optimizer=True, map_location=None):
+                return None
+
+        rt._patch_runner_foot_optimizer(Runner)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "model_0.pt")
+            runner = Runner()
+            runner.alg = type("Alg", (), {"foot_optimizer": Foot()})()
+            runner.save(path)
+            self.assertEqual(Path(path).read_bytes(), b"not-a-pickle")
+
+    def test_store_code_state_survives_dubious_ownership(self):
+        class FakeOpr:
+            pass
+
+        def boom(*_a, **_k):
+            raise RuntimeError("detected dubious ownership")
+
+        FakeOpr.store_code_state = boom
+        self.rt._patch_store_code_state(FakeOpr)
+        self.assertEqual(FakeOpr.store_code_state("logs", []), [])
+
+    def test_wandb_writer_patch_recovers_init_and_config_update(self):
+        src = Path(__file__).resolve().parents[1] / "scripts" / "rsl_rl" / "beamdojo_runtime.py"
+        text = src.read_text()
+        self.assertIn("def _patch_wandb_config_update", text)
+        self.assertIn("allow_val_change", text)
+        self.assertIn("Keeping the W&B run if wandb.init already succeeded", text)
+        self.assertIn('"log_config", orig_log_config', text)
+        self.assertIn("def sanitize_ep_infos_for_rsl_log", text)
+        self.assertIn("def _patch_runner_log_ep_infos", text)
+        self.assertIn("def retry_call", text)
+        self.assertIn("def _patch_wandb_init_retry", text)
+        self.assertIn("def _apply_live_run_note", text)
+
+    def test_retry_call_succeeds_after_transient_failures(self):
+        n = {"i": 0}
+
+        def flaky():
+            n["i"] += 1
+            if n["i"] < 3:
+                raise RuntimeError("http 503")
+            return "ok"
+
+        slept = []
+        self.assertEqual(
+            self.rt.retry_call(flaky, attempts=3, label="wandb.init", sleeper=slept.append),
+            "ok",
+        )
+        self.assertEqual(n["i"], 3)
+        self.assertEqual(len(slept), 2)
+
+    def test_retry_call_raises_after_attempts(self):
+        def boom():
+            raise RuntimeError("nope")
+
+        with self.assertRaises(RuntimeError):
+            self.rt.retry_call(boom, attempts=2, label="wandb.init", sleeper=lambda _s: None)
+
+    def test_wrapper_writes_log_and_top_level_foothold(self):
+        rt = self.rt
+
+        class Vec(list):
+            def __mul__(self, other):
+                return Vec(x * other for x in self)
+
+        class Env:
+            unwrapped = None
+            beamdojo_foothold_step = Vec([-3.0, -1.0])
+            step_dt = 0.02
+
+            def __init__(self):
+                self.unwrapped = self
+
+            def step(self, _action):
+                return (None, None, None, None, {"log": {"Episode_Reward/foothold_penalty": 1.5}})
+
+        env = Env()
+        wrapped = rt.FootholdExtrasWrapper(env)
+        info = wrapped.step(None)[-1]
+        self.assertEqual(info["foothold_reward"], [-0.06, -0.02])
+        self.assertEqual(info["log"]["Episode_Reward/foothold_penalty"], 1.5)
+        self.assertAlmostEqual(info["log"]["foothold_penalty"], -0.04)
+
+    def test_wrapper_copies_foothold_onto_unwrapped_extras(self):
+        rt = self.rt
+
+        class Vec(list):
+            def __mul__(self, other):
+                return Vec(x * other for x in self)
+
+        class Env:
+            unwrapped = None
+            extras = {"log": {"Episode_Reward/foothold_penalty": 0.8}}
+            beamdojo_foothold_step = Vec([-1.0])
+            step_dt = 0.02
+
+            def __init__(self):
+                self.unwrapped = self
+
+            def step(self, _action):
+                return (None, None, None, None, {"log": {"Episode_Reward/foothold_penalty": 0.8}})
+
+        env = Env()
+        wrapped = rt.FootholdExtrasWrapper(env)
+        info = wrapped.step(None)[-1]
+        self.assertEqual(info["foothold_penalty"], [-0.02])
+        self.assertEqual(env.extras["foothold_penalty"], [-0.02])
+        self.assertEqual(env.extras["log"]["Episode_Reward/foothold_penalty"], 0.8)
+        self.assertAlmostEqual(env.extras["log"]["foothold_penalty"], -0.02)
+        self.assertAlmostEqual(info["log"]["foothold_penalty"], -0.02)
+
+    def test_sanitize_ep_infos_collapses_per_env_and_drops_junk(self):
+        infos = [
+            {"Episode_Reward/x": 1.0, "foothold_penalty": [-0.4, -0.2], "note": "nope"},
+            {"foothold_penalty": [-0.1]},
+        ]
+        self.rt.sanitize_ep_infos_for_rsl_log(infos)
+        self.assertEqual(infos[0]["Episode_Reward/x"], 1.0)
+        self.assertAlmostEqual(infos[0]["foothold_penalty"], -0.3)
+        self.assertNotIn("note", infos[0])
+        self.assertAlmostEqual(infos[1]["foothold_penalty"], -0.1)
+
+    def test_patched_log_sanitizes_before_writer(self):
+        seen = []
+
+        class Runner:
+            def log(self, locs, width=80, pad=35):
+                del width, pad
+                seen.append(locs["ep_infos"][0]["foothold_penalty"])
+
+        self.rt._patch_runner_log_ep_infos(Runner)
+        Runner().log({"ep_infos": [{"foothold_penalty": [-1.0, -3.0]}]})
+        self.assertEqual(seen, [-2.0])
+
+    def test_rsl_style_ep_info_cat_survives_sanitized_foothold(self):
+        """rsl-rl 3.0.1 log() cats every extras['log'] key; mixed [N] vs 0-dim throws."""
+        ep_infos = [
+            {"Episode_Reward/track": 1.0, "foothold_penalty": [-0.06, -0.02]},
+            {"Episode_Reward/track": 1.0, "foothold_penalty": [-0.04, 0.0]},
+        ]
+        self.rt.sanitize_ep_infos_for_rsl_log(ep_infos)
+        for key in ep_infos[0]:
+            infotensor = []
+            for ep_info in ep_infos:
+                value = ep_info[key]
+                self.assertIsInstance(value, float)
+                infotensor.append(value)
+            self.assertEqual(len(infotensor), 2)
+
+
+class RunnerCfgSanitizeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.rt = _load_runtime()
+
+    def test_empty_hydra_rnd_cfg_is_sanitized_to_none(self):
+        cfg = {
+            "algorithm": {
+                "class_name": "PPO",
+                "rnd_cfg": {},
+                "symmetry_cfg": {},
+            }
+        }
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertIsNone(cfg["algorithm"]["rnd_cfg"])
+        self.assertIsNone(cfg["algorithm"]["symmetry_cfg"])
+        self.assertEqual(cfg["algorithm"]["class_name"], "PPODoubleCritic")
+        self.assertEqual(cfg["obs_groups"], {"policy": ["policy"], "critic": ["policy"]})
+
+    def test_distillation_class_name_is_left_intact(self):
+        cfg = {"algorithm": {"class_name": "Distillation"}, "policy": {"class_name": "StudentTeacher"}}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["algorithm"]["class_name"], "Distillation")
+        self.assertEqual(cfg["policy"]["class_name"], "StudentTeacher")
+
+    def test_empty_critic_obs_groups_are_filled_from_policy(self):
+        cfg = {"obs_groups": {"policy": ["policy"], "critic": []}}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["obs_groups"], {"policy": ["policy"], "critic": ["policy"]})
+
+    def test_leftover_critic_group_name_is_rewritten(self):
+        cfg = {"obs_groups": {"policy": ["policy"], "critic": ["critic"]}}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["obs_groups"], {"policy": ["policy"], "critic": ["policy"]})
+
+    def test_leftover_rnd_state_obs_set_is_dropped(self):
+        cfg = {
+            "obs_groups": {
+                "policy": ["policy"],
+                "critic": ["policy"],
+                "rnd_state": ["rnd_state"],
+            }
+        }
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["obs_groups"], {"policy": ["policy"], "critic": ["policy"]})
+
+    def test_leftover_actor_critic_class_is_restored(self):
+        cfg = {"policy": {"class_name": "ActorCritic"}, "algorithm": {"class_name": "PPO"}}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["policy"]["class_name"], "ActorCriticDouble")
+        self.assertEqual(cfg["algorithm"]["class_name"], "PPODoubleCritic")
+
+    def test_leftover_recurrent_actor_is_restored(self):
+        cfg = {"policy": {"class_name": "ActorCriticRecurrent"}, "algorithm": {"class_name": "PPO"}}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["policy"]["class_name"], "ActorCriticDouble")
+        self.assertEqual(cfg["algorithm"]["class_name"], "PPODoubleCritic")
+
+    def test_leftover_official_h1_mlp_is_paper_dims(self):
+        cfg = {
+            "policy": {
+                "class_name": "ActorCritic",
+                "actor_hidden_dims": [512, 256, 128],
+                "critic_hidden_dims": [512, 256, 128],
+            },
+            "algorithm": {"class_name": "PPO"},
+        }
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["policy"]["actor_hidden_dims"], [512, 216, 128])
+        self.assertEqual(cfg["policy"]["critic_hidden_dims"], [512, 216, 128])
+
+    def test_leftover_algorithm_device_and_empty_multi_gpu_are_dropped(self):
+        cfg = {
+            "algorithm": {
+                "class_name": "PPODoubleCritic",
+                "device": "cuda:0",
+                "multi_gpu_cfg": {},
+            },
+            "policy": {
+                "class_name": "ActorCriticDouble",
+                "obs": {"policy": [1]},
+                "obs_groups": {"policy": ["policy"]},
+                "num_actions": 19,
+            },
+        }
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertNotIn("device", cfg["algorithm"])
+        self.assertNotIn("multi_gpu_cfg", cfg["algorithm"])
+        self.assertNotIn("obs", cfg["policy"])
+        self.assertNotIn("obs_groups", cfg["policy"])
+        self.assertNotIn("num_actions", cfg["policy"])
+
+    def test_leftover_missing_runner_intervals_are_restored(self):
+        cfg = {"algorithm": {"class_name": "PPODoubleCritic"}}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["num_steps_per_env"], 24)
+        self.assertEqual(cfg["save_interval"], 100)
+        cfg["num_steps_per_env"] = -1
+        cfg["save_interval"] = -5
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["num_steps_per_env"], 24)
+        self.assertEqual(cfg["save_interval"], 100)
+
+    def test_leftover_ppo_hparams_and_obs_normalization_are_restored(self):
+        cfg = {
+            "algorithm": {
+                "class_name": "PPODoubleCritic",
+                "learning_rate": None,
+                "gamma": 0,
+                "num_learning_epochs": -1,
+                "schedule": "linear",
+                "entropy_coef": 0.008,
+            },
+            "policy": {
+                "actor_obs_normalization": "false",
+                "critic_obs_normalization": {},
+            },
+        }
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["algorithm"]["learning_rate"], 3.0e-4)
+        self.assertEqual(cfg["algorithm"]["gamma"], 0.99)
+        self.assertEqual(cfg["algorithm"]["num_learning_epochs"], 5)
+        self.assertEqual(cfg["algorithm"]["schedule"], "adaptive")
+        self.assertEqual(cfg["algorithm"]["entropy_coef"], 0.008)
+        self.assertFalse(cfg["policy"]["actor_obs_normalization"])
+        self.assertFalse(cfg["policy"]["critic_obs_normalization"])
+        self.assertTrue(self.rt.leftover_invalid_ppo_float(None))
+        self.assertTrue(self.rt.leftover_invalid_ppo_schedule("linear"))
+        self.assertFalse(self.rt.leftover_invalid_ppo_float(3.0e-4))
+        self.assertFalse(self.rt.leftover_invalid_obs_normalization(False))
+        self.assertTrue(self.rt.leftover_invalid_obs_normalization("false"))
+
+    def test_incomplete_symmetry_cfg_is_sanitized_to_none(self):
+        cfg = {
+            "algorithm": {
+                "symmetry_cfg": {
+                    "use_data_augmentation": True,
+                    "use_mirror_loss": False,
+                }
+            }
+        }
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertIsNone(cfg["algorithm"]["symmetry_cfg"])
+
+    def test_unknown_policy_class_and_noise_std_are_restored(self):
+        cfg = {
+            "policy": {"class_name": "PPORecurrent", "noise_std_type": "state_dependent"},
+            "algorithm": {"class_name": "PPORecurrent"},
+        }
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["policy"]["class_name"], "ActorCriticDouble")
+        self.assertEqual(cfg["algorithm"]["class_name"], "PPODoubleCritic")
+        self.assertEqual(cfg["policy"]["noise_std_type"], "scalar")
+
+    def test_reassert_runner_class_restores_on_policy(self):
+        agent = type("A", (), {"class_name": None})()
+        self.rt.reassert_runner_class(agent)
+        self.assertEqual(agent.class_name, "OnPolicyRunner")
+        distill = type("A", (), {"class_name": "DistillationRunner"})()
+        self.rt.reassert_runner_class(distill)
+        self.assertEqual(distill.class_name, "DistillationRunner")
+
+    def test_missing_algorithm_policy_and_bad_logger_are_restored(self):
+        cfg = {"logger": "mlflow"}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["algorithm"]["class_name"], "PPODoubleCritic")
+        self.assertEqual(cfg["policy"]["class_name"], "ActorCriticDouble")
+        self.assertEqual(cfg["logger"], "tensorboard")
+        cfg["policy"]["activation"] = "swish"
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["policy"]["activation"], "elu")
+        cfg["policy"]["init_noise_std"] = None
+        cfg["clip_actions"] = False
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["policy"]["init_noise_std"], 1.0)
+        self.assertIsNone(cfg["clip_actions"])
+        cfg["empirical_normalization"] = {}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertFalse(cfg["empirical_normalization"])
+
+    def test_leftover_cpu_device_helper(self):
+        self.assertTrue(self.rt.leftover_cpu_device("cpu"))
+        self.assertTrue(self.rt.leftover_cpu_device("CPU:0"))
+        self.assertFalse(self.rt.leftover_cpu_device("cuda:0"))
+        self.assertFalse(self.rt.leftover_cpu_device(None))
+        agent = type("A", (), {"device": "cpu"})()
+        self.rt.reassert_agent_cuda(agent)
+        self.assertEqual(agent.device, "cuda:0")
+
+    def test_leftover_unusable_device_and_clip_actions(self):
+        self.assertTrue(self.rt.leftover_unusable_device("cuda:1"))
+        self.assertTrue(self.rt.leftover_unusable_device("mps"))
+        self.assertFalse(self.rt.leftover_unusable_device("cuda:0"))
+        self.assertFalse(self.rt.leftover_unusable_device("cuda"))
+        with mock.patch.dict(os.environ, {"WORLD_SIZE": "2"}, clear=False):
+            self.assertFalse(self.rt.leftover_unusable_device("cuda:1"))
+        agent = type("A", (), {"device": "cuda:1", "clip_actions": True})()
+        self.rt.reassert_agent_cuda(agent)
+        self.rt.reassert_clip_actions(agent)
+        self.assertEqual(agent.device, "cuda:0")
+        self.assertIsNone(agent.clip_actions)
+        self.assertIsNone(self.rt.sanitize_clip_actions("true"))
+        self.assertIsNone(self.rt.sanitize_clip_actions(0))
+        self.assertEqual(self.rt.sanitize_clip_actions(1.0), 1.0)
+
+    def test_valid_obs_groups(self):
+        self.assertTrue(self.rt.valid_obs_groups({"policy": ["policy"], "critic": ["policy"]}))
+        self.assertFalse(self.rt.valid_obs_groups(None))
+        self.assertFalse(self.rt.valid_obs_groups({}))
+        self.assertFalse(self.rt.valid_obs_groups({"policy": []}))
+
+    def test_beamdojo_obs_groups_reject_missing_env_groups(self):
+        self.assertTrue(self.rt.beamdojo_obs_groups_ok({"policy": ["policy"]}))
+        self.assertTrue(self.rt.beamdojo_obs_groups_ok({"policy": ["policy"], "critic": ["policy"]}))
+        self.assertFalse(self.rt.beamdojo_obs_groups_ok({"policy": ["policy"], "critic": ["critic"]}))
+        self.assertFalse(self.rt.beamdojo_obs_groups_ok({"policy": ["policy", "privileged"]}))
+        self.assertFalse(
+            self.rt.beamdojo_obs_groups_ok(
+                {"policy": ["policy"], "critic": ["policy"], "rnd_state": ["rnd_state"]}
+            )
+        )
+
+    def test_default_isaaclab_rnd_dump_is_sanitized_to_none(self):
+        cfg = {
+            "algorithm": {
+                "rnd_cfg": {
+                    "weight": 0.0,
+                    "weight_schedule": None,
+                    "learning_rate": 0.001,
+                    "predictor_hidden_dims": [-1],
+                    "target_hidden_dims": [-1],
+                }
+            }
+        }
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertIsNone(cfg["algorithm"]["rnd_cfg"])
+
+    def test_populated_rnd_cfg_is_left_intact(self):
+        rnd = {"weight": 0.1, "learning_rate": 1e-4}
+        cfg = {"algorithm": {"rnd_cfg": dict(rnd)}}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["algorithm"]["rnd_cfg"], rnd)
+
+    def test_runner_cfg_dict_sanitizes_to_dict_payload(self):
+        class Agent:
+            def to_dict(self):
+                return {"algorithm": {"rnd_cfg": {}, "symmetry_cfg": {}}}
+
+        out = self.rt.runner_cfg_dict(Agent())
+        self.assertIsNone(out["algorithm"]["rnd_cfg"])
+        self.assertIsNone(out["algorithm"]["symmetry_cfg"])
+        self.assertEqual(out["algorithm"]["class_name"], "PPODoubleCritic")
+        self.assertEqual(out["obs_groups"], {"policy": ["policy"], "critic": ["policy"]})
+
+
+class ReassertGpuEnvCfgTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.rt = _load_runtime()
+
+    def test_parent_raycast_height_scan_detects_func_and_sensor(self):
+        rt = self.rt
+
+        class Func:
+            __name__ = "height_scan"
+
+        class Term:
+            func = Func()
+            params = {"sensor_cfg": {"name": "robot"}}
+
+        self.assertTrue(rt.parent_raycast_height_scan(Term()))
+
+        class TaskFunc:
+            __name__ = "task_height_scan"
+
+        class ParentSensor:
+            name = "height_scanner"
+
+        leftover = type("T", (), {"func": TaskFunc(), "params": {"sensor_cfg": ParentSensor()}})()
+        self.assertTrue(rt.parent_raycast_height_scan(leftover))
+        ok = type("T", (), {"func": TaskFunc(), "params": {"sensor_cfg": {"name": "robot"}}})()
+        self.assertFalse(rt.parent_raycast_height_scan(ok))
+        self.assertFalse(rt.parent_raycast_height_scan(None))
+
+    def test_reassert_clears_scanner_commands_and_physics_material(self):
+        plane_mat = object()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": object(),
+                        "terrain": type(
+                            "Terrain",
+                            (),
+                            {
+                                "terrain_type": "plane",
+                                "terrain_generator": None,
+                                "debug_vis": False,
+                                "physics_material": plane_mat,
+                            },
+                        )(),
+                    },
+                )(),
+                "observations": type(
+                    "Obs",
+                    (),
+                    {
+                        "policy": type(
+                            "Pol",
+                            (),
+                            {
+                                "height_scan": type(
+                                    "T",
+                                    (),
+                                    {
+                                        "func": type("F", (), {"__name__": "task_height_scan"})(),
+                                        "params": {"sensor_cfg": {"name": "robot"}},
+                                    },
+                                )()
+                            },
+                        )()
+                    },
+                )(),
+                "commands": type(
+                    "Cmd",
+                    (),
+                    {
+                        "base_velocity": type(
+                            "Vel",
+                            (),
+                            {"debug_vis": True, "heading_command": True},
+                        )()
+                    },
+                )(),
+                "sim": type("Sim", (), {"physics_material": object()})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNone(cfg.scene.height_scanner)
+        self.assertFalse(cfg.commands.base_velocity.debug_vis)
+        self.assertFalse(cfg.commands.base_velocity.heading_command)
+        self.assertIs(cfg.sim.physics_material, plane_mat)
+
+    def test_reassert_flattens_generator_terrain(self):
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": type(
+                            "Terrain",
+                            (),
+                            {
+                                "terrain_type": "generator",
+                                "terrain_generator": object(),
+                                "debug_vis": True,
+                                "physics_material": "walk",
+                                "visual_material": "nucleus-mdl",
+                            },
+                        )(),
+                        "sky_light": type(
+                            "Sky",
+                            (),
+                            {"spawn": type("Spawn", (), {"texture_file": "/nucleus/sky.hdr"})()},
+                        )(),
+                    },
+                )(),
+                "observations": type(
+                    "Obs",
+                    (),
+                    {
+                        "policy": type(
+                            "Pol",
+                            (),
+                            {
+                                "concatenate_terms": False,
+                                "flatten_history_dim": False,
+                                "height_scan": None,
+                            },
+                        )()
+                    },
+                )(),
+                "commands": None,
+                "sim": type("Sim", (), {"physics_material": "old"})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(cfg.scene.terrain.terrain_type, "plane")
+        self.assertIsNone(cfg.scene.terrain.terrain_generator)
+        self.assertFalse(cfg.scene.terrain.debug_vis)
+        self.assertIsNone(cfg.scene.terrain.visual_material)
+        self.assertIsNone(cfg.scene.sky_light.spawn.texture_file)
+        self.assertTrue(cfg.observations.policy.concatenate_terms)
+        self.assertTrue(cfg.observations.policy.flatten_history_dim)
+        self.assertEqual(cfg.sim.physics_material, "walk")
+
+    def test_reassert_clears_leftover_terrain_levels(self):
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "task_stone_0": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "curriculum": type("Cur", (), {"terrain_levels": object(), "beam_width": "keep"})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNone(cfg.curriculum.terrain_levels)
+        self.assertEqual(cfg.curriculum.beam_width, "keep")
+
+    def test_reassert_restores_g1_twelve_dof_and_stage2_spawn(self):
+        from h1_cfg.robot_spec import G1
+
+        joint_pos = type("J", (), {"joint_names": [".*"]})()
+        reset_params = {"pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)}}
+        physx = type("P", (), {"gpu_max_rigid_patch_count": 10 * 2**15, "gpu_max_rigid_contact_count": 2**24})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": object(), "task_stone_0": None},
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": type("Sim", (), {"physx": physx})(),
+                "rewards": type("Rew", (), {"joint_deviation_fingers": object()})(),
+                "actions": type("Act", (), {"joint_pos": joint_pos})(),
+                "events": type("Ev", (), {"reset_base": type("T", (), {"params": reset_params})()})(),
+                "curriculum": type("Cur", (), {"terrain_levels": object()})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(joint_pos.joint_names, list(G1.action_joints))
+        self.assertEqual(reset_params["pose_range"]["y"], (-0.08, 0.08))
+        self.assertEqual(reset_params["pose_range"]["x"], (-0.2, 0.5))
+        self.assertEqual(physx.gpu_max_rigid_patch_count, 16 * 2**15)
+        self.assertEqual(physx.gpu_max_rigid_contact_count, 2**23)
+        self.assertIsNone(cfg.curriculum.terrain_levels)
+
+    def test_reassert_replaces_parent_height_scan_without_isaac(self):
+        called = []
+
+        class Policy:
+            height_scan = type(
+                "T",
+                (),
+                {
+                    "func": type("F", (), {"__name__": "height_scan"})(),
+                    "params": {"sensor_cfg": {"name": "height_scanner"}},
+                },
+            )()
+
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None})(),
+                "observations": type("Obs", (), {"policy": Policy()})(),
+                "commands": None,
+                "sim": None,
+            },
+        )()
+
+        def fake_install(policy):
+            called.append(policy)
+            policy.height_scan = "task"
+
+        with mock.patch.object(self.rt, "_install_task_height_scan", fake_install):
+            self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(called, [cfg.observations.policy])
+        self.assertEqual(cfg.observations.policy.height_scan, "task")
+
+    def test_leftover_all_joints(self):
+        self.assertTrue(self.rt.leftover_all_joints(".*"))
+        self.assertTrue(self.rt.leftover_all_joints([".*"]))
+        self.assertFalse(self.rt.leftover_all_joints([".*_hip_yaw_joint"]))
+        self.assertFalse(self.rt.leftover_all_joints(None))
+
+    def test_reassert_official_reset_and_infinite_horizon(self):
+        reset_params = {
+            "pose_range": {"x": (-0.2, 0.2), "y": (-0.08, 0.08), "yaw": (-0.2, 0.2)},
+            "velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "z": (0.0, 0.0)},
+        }
+        joint_params = {"position_range": (0.5, 1.5)}
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "is_finite_horizon": True,
+                "events": type(
+                    "Ev",
+                    (),
+                    {
+                        "push_robot": object(),
+                        "reset_base": type("T", (), {"params": reset_params})(),
+                        "reset_robot_joints": type("T", (), {"params": joint_params})(),
+                    },
+                )(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNone(cfg.events.push_robot)
+        self.assertEqual(reset_params["velocity_range"]["x"], (0.0, 0.0))
+        self.assertEqual(reset_params["velocity_range"]["y"], (0.0, 0.0))
+        self.assertEqual(joint_params["position_range"], (1.0, 1.0))
+        self.assertFalse(cfg.is_finite_horizon)
+
+    def test_reassert_event_modes_weights_params_and_action_clip(self):
+        reset_base = type("T", (), {"mode": None, "params": {}, "min_step_count_between_reset": None})()
+        interval_reset = type("T", (), {"mode": "interval", "interval_range_s": None})()
+        track = type("T", (), {"weight": None, "func": object(), "params": {}})()
+        broken_reward = type("T", (), {"weight": 1.0, "func": object(), "params": None})()
+        joint_pos = type(
+            "J",
+            (),
+            {
+                "asset_name": "robot",
+                "joint_names": [".*"],
+                "scale": 0.25,
+                "offset": None,
+                "clip": (None, None),
+            },
+        )()
+        cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "actions": type("Act", (), {"joint_pos": joint_pos})(),
+                "rewards": type(
+                    "Rew",
+                    (),
+                    {"track_lin_vel_xy_exp": track, "feet_air_time": broken_reward},
+                )(),
+                "events": type(
+                    "Ev",
+                    (),
+                    {
+                        "reset_base": reset_base,
+                        "reset_robot_joints": type("T", (), {"mode": "reset", "params": {}})(),
+                        "push_robot": interval_reset,
+                    },
+                )(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(reset_base.mode, "reset")
+        self.assertEqual(reset_base.min_step_count_between_reset, 0)
+        self.assertIsNone(cfg.events.push_robot)
+        self.assertEqual(track.weight, 1.0)
+        self.assertIsNone(cfg.rewards.feet_air_time)
+        self.assertEqual(joint_pos.offset, 0.0)
+        self.assertIsNone(joint_pos.clip)
+
+    def test_reassert_restores_missing_physx_and_gravity(self):
+        sim = type("Sim", (), {"physx": None, "gravity": None, "dt": 0.005, "device": "cuda:0"})()
+        cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": sim,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNotNone(sim.physx)
+        self.assertEqual(sim.gravity, (0.0, 0.0, -9.81))
+        self.assertFalse(sim.physx.enable_ccd)
+        self.assertEqual(sim.physx.gpu_collision_stack_size, 2**26)
+
+    def test_reassert_restores_empty_policy_obs_after_func_none_drop(self):
+        dead = type("T", (), {"func": None, "scale": 1.0})()
+        policy = type(
+            "ObsGroup",
+            (),
+            {"concatenate_terms": True, "history_length": None, "base_lin_vel": dead},
+        )()
+        cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": type("O", (), {"policy": policy})(),
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.assertTrue(self.rt.leftover_empty_policy_obs(cfg))
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertFalse(self.rt.leftover_empty_policy_obs(cfg))
+        self.assertTrue(
+            any(
+                self.rt.leftover_live_obs_term(term)
+                for name, term in self.rt._iter_obs_terms(cfg.observations.policy)
+                if name not in self.rt.OBS_GROUP_META
+            )
+        )
+
+    def test_reassert_obs_modifiers_incomplete_physx_and_action_debug_vis(self):
+        term = type(
+            "T",
+            (),
+            {"func": object(), "scale": 1.0, "modifiers": [type("M", (), {"params": None})()]},
+        )()
+        physx = type(
+            "Physx",
+            (),
+            {"enable_ccd": None, "gpu_collision_stack_size": None, "gpu_max_num_partitions": 3},
+        )()
+        sim = type("Sim", (), {"physx": physx, "dt": 0.005, "device": "cuda:0"})()
+        joint = type("J", (), {"scale": 0.25, "debug_vis": True})()
+        cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": type(
+                    "O",
+                    (),
+                    {"policy": type("P", (), {"concatenate_terms": True, "base_lin_vel": term})()},
+                )(),
+                "actions": type("A", (), {"joint_pos": joint})(),
+                "commands": None,
+                "sim": sim,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNone(term.modifiers)
+        self.assertFalse(physx.enable_ccd)
+        self.assertEqual(physx.gpu_collision_stack_size, 2**26)
+        self.assertEqual(physx.gpu_max_num_partitions, 8)
+        self.assertFalse(joint.debug_vis)
+
+    def test_reassert_restores_viewer_seed_and_num_rerenders(self):
+        viewer = type("V", (), {"eye": None, "lookat": (0.0, 0.0, 0.0), "origin_type": "asset_root"})()
+        cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "viewer": None,
+                "seed": "none",
+                "num_rerenders_on_reset": None,
+            },
+        )()
+        self.assertTrue(self.rt.leftover_missing_viewer(cfg))
+        self.assertTrue(self.rt.leftover_invalid_seed(cfg))
+        self.assertTrue(self.rt.leftover_invalid_num_rerenders(cfg))
+        self.assertTrue(self.rt.leftover_invalid_viewer(viewer))
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNotNone(cfg.viewer)
+        self.assertEqual(cfg.viewer.origin_type, "world")
+        self.assertIsNone(cfg.seed)
+        self.assertEqual(cfg.num_rerenders_on_reset, 0)
+
+    def test_reassert_obs_history_none_concatenate_dim_and_physics_material(self):
+        lin_vel = type("T", (), {"func": object(), "history_length": None, "scale": 2.0})()
+        policy = type(
+            "ObsGroup",
+            (),
+            {
+                "concatenate_terms": True,
+                "concatenate_dim": None,
+                "history_length": None,
+                "base_lin_vel": lin_vel,
+            },
+        )()
+        sim = type("Sim", (), {"physics_material": None, "dt": 0.005, "device": "cuda:0"})()
+        walk = object()
+        cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": type("Terr", (), {"physics_material": walk})(),
+                        "catcher": None,
+                    },
+                )(),
+                "observations": type("O", (), {"policy": policy})(),
+                "commands": None,
+                "sim": sim,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(lin_vel.history_length, 0)
+        self.assertIsNone(policy.history_length)
+        self.assertEqual(policy.concatenate_dim, -1)
+        self.assertIs(sim.physics_material, walk)
+
+    def test_reassert_restores_nulled_reset_base_params(self):
+        cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "events": type(
+                    "Ev",
+                    (),
+                    {
+                        "reset_base": type("T", (), {"mode": "reset", "params": None})(),
+                        "reset_robot_joints": type("T", (), {"mode": "reset", "params": {"position_range": (1.0, 1.0)}})(),
+                    },
+                )(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsInstance(cfg.events.reset_base.params, dict)
+        self.assertIn("pose_range", cfg.events.reset_base.params)
+        self.assertEqual(cfg.events.reset_base.mode, "reset")
+
+    def test_h1_full_body_actions_are_not_rewritten(self):
+        joint_pos = type("J", (), {"joint_names": [".*"]})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "rewards": type("Rew", (), {"joint_deviation_fingers": None})(),
+                "actions": type("Act", (), {"joint_pos": joint_pos})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(joint_pos.joint_names, [".*"])
+
+    def test_leftover_h1_regexes_are_restored_on_g1(self):
+        from h1_cfg.robot_spec import G1, G1_FINGER_JOINTS
+
+        hip = type("E", (), {"joint_names": [".*_hip_yaw", ".*_hip_roll"]})()
+        torso = type("E", (), {"joint_names": "torso"})()
+        ankle = type("E", (), {"joint_names": ".*_ankle"})()
+        arms = type("E", (), {"joint_names": [".*_shoulder_.*", ".*_elbow"]})()
+        fingers = type("E", (), {"joint_names": list(G1_FINGER_JOINTS)})()
+        feet = type("E", (), {"body_names": ".*ankle_link"})()
+        joint_pos = type("J", (), {"joint_names": [".*"]})()
+        robot = type("R", (), {"usd_path": "/Isaac/Robots/Unitree/G1/g1_minimal.usd"})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": None, "robot": robot},
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "rewards": type(
+                    "Rew",
+                    (),
+                    {
+                        "joint_deviation_fingers": type("T", (), {"params": {"asset_cfg": fingers}})(),
+                        "joint_deviation_hip": type("T", (), {"params": {"asset_cfg": hip}})(),
+                        "joint_deviation_torso": type("T", (), {"params": {"asset_cfg": torso}})(),
+                        "joint_deviation_arms": type("T", (), {"params": {"asset_cfg": arms}})(),
+                        "dof_pos_limits": type("T", (), {"params": {"asset_cfg": ankle}})(),
+                        "feet_air_time": type("T", (), {"params": {"sensor_cfg": feet}})(),
+                    },
+                )(),
+                "actions": type("Act", (), {"joint_pos": joint_pos})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(joint_pos.joint_names, list(G1.action_joints))
+        self.assertEqual(hip.joint_names, [G1.hip_yaw, G1.hip_roll])
+        self.assertEqual(torso.joint_names, G1.torso_joint)
+        self.assertEqual(ankle.joint_names, G1.ankle_joints)
+        self.assertEqual(arms.joint_names, G1.arm_joints)
+        self.assertEqual(fingers.joint_names, list(G1_FINGER_JOINTS))
+        self.assertEqual(feet.body_names, G1.feet_body)
+        self.assertIsNotNone(cfg.rewards.joint_deviation_fingers)
+
+    def test_h1_leftover_fingers_are_dropped_and_g1_regexes_are_not_applied(self):
+        from h1_cfg.robot_spec import H1, G1_FINGER_JOINTS
+
+        hip = type("E", (), {"joint_names": [".*_hip_yaw", ".*_hip_roll"]})()
+        torso = type("E", (), {"joint_names": "torso"})()
+        fingers = type("E", (), {"joint_names": list(G1_FINGER_JOINTS)})()
+        joint_pos = type("J", (), {"joint_names": [".*"]})()
+        robot = type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": None, "robot": robot},
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "rewards": type(
+                    "Rew",
+                    (),
+                    {
+                        "joint_deviation_fingers": type("T", (), {"params": {"asset_cfg": fingers}})(),
+                        "joint_deviation_hip": type("T", (), {"params": {"asset_cfg": hip}})(),
+                        "joint_deviation_torso": type("T", (), {"params": {"asset_cfg": torso}})(),
+                    },
+                )(),
+                "actions": type("Act", (), {"joint_pos": joint_pos})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNone(cfg.rewards.joint_deviation_fingers)
+        self.assertEqual(joint_pos.joint_names, [".*"])
+        self.assertEqual(hip.joint_names, [H1.hip_yaw, H1.hip_roll])
+        self.assertEqual(torso.joint_names, H1.torso_joint)
+
+    def test_leftover_g1_regexes_are_restored_on_h1(self):
+        from h1_cfg.robot_spec import H1
+
+        hip = type("E", (), {"joint_names": [".*_hip_yaw_joint", ".*_hip_roll_joint"]})()
+        torso = type("E", (), {"joint_names": "torso_joint"})()
+        robot = type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": None, "robot": robot},
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "rewards": type(
+                    "Rew",
+                    (),
+                    {
+                        "joint_deviation_fingers": None,
+                        "joint_deviation_hip": type("T", (), {"params": {"asset_cfg": hip}})(),
+                        "joint_deviation_torso": type("T", (), {"params": {"asset_cfg": torso}})(),
+                    },
+                )(),
+                "actions": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(hip.joint_names, [H1.hip_yaw, H1.hip_roll])
+        self.assertEqual(torso.joint_names, H1.torso_joint)
+
+    def test_leftover_joint_name_helpers(self):
+        self.assertTrue(self.rt.leftover_h1_joints_for_g1("torso"))
+        self.assertTrue(self.rt.leftover_h1_joints_for_g1([".*_hip_yaw"]))
+        self.assertTrue(self.rt.leftover_h1_joints_for_g1(".*_hip_pitch"))
+        self.assertTrue(self.rt.leftover_h1_joints_for_g1(".*_knee"))
+        self.assertTrue(self.rt.leftover_h1_joints_for_g1(".*_shoulder_pitch"))
+        self.assertTrue(self.rt.leftover_h1_torso_name("torso"))
+        self.assertFalse(self.rt.leftover_h1_torso_name("torso_joint"))
+        self.assertTrue(self.rt.leftover_g1_joints_for_h1("torso_joint"))
+        self.assertTrue(self.rt.leftover_h1_bodies_for_g1(".*ankle_link"))
+        self.assertFalse(self.rt.leftover_h1_joints_for_g1(".*_hip_yaw_joint"))
+        self.assertFalse(self.rt.leftover_h1_joints_for_g1(".*_shoulder_.*"))
+        self.assertTrue(self.rt.leftover_universal_joint_expr(".*"))
+        self.assertFalse(self.rt.leftover_h1_joint_name(".*"))
+        self.assertFalse(self.rt.leftover_g1_joint_name(".*"))
+        self.assertTrue(self.rt.leftover_h1_joint_name(".*_hip_pitch"))
+        self.assertTrue(self.rt.leftover_h1_joint_name("left_hip_pitch"))
+        self.assertFalse(self.rt.leftover_h1_joint_name(".*_hip_pitch_joint"))
+        self.assertTrue(self.rt.leftover_g1_joint_name(".*_hip_pitch_joint"))
+        self.assertTrue(self.rt.leftover_g1_joint_name("left_one_joint"))
+        self.assertFalse(self.rt.leftover_g1_joint_name(".*_hip_pitch"))
+
+    def test_leftover_anymal_usd_is_restored_to_g1_minimal(self):
+        robot = type(
+            "R",
+            (),
+            {
+                "usd_path": "/Isaac/Robots/ANYbotics/ANYmal-D/anymal_d.usd",
+                "init_state": type("S", (), {"pos": (0.0, 0.0, 0.6)})(),
+            },
+        )()
+        cfg = type(
+            "BeamDojoStage1G1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": robot,
+                        "env_spacing": 2.5,
+                        "contact_forces": type("C", (), {"history_length": 0, "track_air_time": False})(),
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "rewards": type("Rew", (), {"joint_deviation_fingers": object()})(),
+                "terminations": type("Term", (), {"base_contact": object(), "base_height": object()})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIn("g1_minimal", robot.usd_path.lower())
+        self.assertEqual(robot.init_state.pos[2], 0.74)
+        self.assertEqual(cfg.scene.env_spacing, 8.0)
+        self.assertEqual(cfg.scene.contact_forces.history_length, 3)
+        self.assertTrue(cfg.scene.contact_forces.track_air_time)
+        self.assertIsNone(cfg.terminations.base_contact)
+        self.assertIsNone(cfg.terminations.base_height)
+
+    def test_leftover_full_h1_usd_and_pelvis_are_restored(self):
+        robot = type(
+            "R",
+            (),
+            {
+                "usd_path": "/Isaac/Robots/Unitree/H1/h1.usd",
+                "init_state": type("S", (), {"pos": (0.0, 0.0, 0.6)})(),
+            },
+        )()
+        cfg = type(
+            "BeamDojoStage1H1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": None, "robot": robot},
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIn("h1_minimal", robot.usd_path.lower())
+        self.assertEqual(robot.init_state.pos[2], 1.05)
+
+    def test_leftover_sim_timing_and_cpu_device_are_restored(self):
+        sim = type("Sim", (), {"dt": 0.0, "device": "cpu", "render_interval": 0})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": sim,
+                "decimation": 0,
+                "episode_length_s": 0,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(cfg.decimation, 4)
+        self.assertEqual(cfg.episode_length_s, 20.0)
+        self.assertEqual(sim.dt, 0.005)
+        self.assertEqual(sim.device, "cuda:0")
+        self.assertEqual(sim.render_interval, 4)
+
+    def test_leftover_cuda1_sim_device_is_restored(self):
+        sim = type("Sim", (), {"dt": 0.005, "device": "cuda:1", "render_interval": 4})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": sim,
+                "decimation": 4,
+                "episode_length_s": 20,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(sim.device, "cuda:0")
+
+    def test_leftover_anymal_init_joints_and_velocity_ranges(self):
+        self.assertTrue(self.rt.leftover_quadruped_joint_key(".*HAA"))
+        self.assertTrue(self.rt.leftover_quadruped_joint_key("LF_HFE"))
+        self.assertTrue(self.rt.leftover_quadruped_joint_key("FL_hip_joint"))
+        self.assertTrue(self.rt.leftover_quadruped_joint_key(".*_calf_joint"))
+        self.assertTrue(self.rt.leftover_quadruped_joint_key("F[L,R]_thigh_joint"))
+        self.assertTrue(self.rt.leftover_quadruped_joint_key(".*L_hip_joint"))
+        self.assertFalse(self.rt.leftover_quadruped_joint_key(".*_hip_yaw"))
+        self.assertFalse(self.rt.leftover_quadruped_joint_key("left_hip_yaw_joint"))
+        state = type(
+            "S",
+            (),
+            {
+                "pos": (0.0, 0.0, 1.05),
+                "joint_pos": {".*HAA": 0.0, ".*_hip_yaw": 0.0},
+                "joint_vel": {"LF_HFE": 0.0, ".*_knee": 0.0},
+            },
+        )()
+        robot = type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd", "init_state": state})()
+        ranges = type("Ranges", (), {"lin_vel_x": None, "lin_vel_y": (-1.0, 1.0), "ang_vel_z": None})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None, "robot": robot})(),
+                "observations": None,
+                "commands": type("Cmd", (), {"base_velocity": type("V", (), {"ranges": ranges})()})(),
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertNotIn(".*HAA", state.joint_pos)
+        self.assertEqual(state.joint_pos[".*_hip_yaw"], 0.0)
+        self.assertNotIn("LF_HFE", state.joint_vel)
+        self.assertEqual(state.joint_vel[".*_knee"], 0.0)
+        self.assertEqual(ranges.lin_vel_x, (-1.0, 1.0))
+        self.assertEqual(ranges.ang_vel_z, (-1.0, 1.0))
+
+    def test_leftover_critic_height_scan_is_cleared(self):
+        leftover = type(
+            "Term",
+            (),
+            {
+                "func": type("F", (), {"__name__": "height_scan"})(),
+                "params": {"sensor_cfg": {"name": "height_scanner"}},
+            },
+        )()
+        critic = type("Group", (), {"height_scan": leftover})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None})(),
+                "observations": type("Obs", (), {"policy": None, "critic": critic})(),
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNone(critic.height_scan)
+
+    def test_leftover_go1_actuators_action_scale_and_imu_term(self):
+        actuators = {
+            "base_legs": type(
+                "A",
+                (),
+                {
+                    "network_file": "/Isaac/ActuatorNets/Unitree/unitree_go1.pt",
+                    "joint_names_expr": [".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
+                },
+            )()
+        }
+        spawn = type("Spawn", (), {"activate_contact_sensors": False})()
+        robot = type(
+            "R",
+            (),
+            {
+                "usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd",
+                "actuators": actuators,
+                "spawn": spawn,
+                "init_state": type("S", (), {"pos": (0.0, 0.0, 1.05), "joint_pos": {".*_calf_joint": -1.5}})(),
+            },
+        )()
+        joint_pos = type("J", (), {"scale": {".*HAA": 0.5, ".*_hip_yaw": 0.25}, "offset": None})()
+        imu = type(
+            "Term",
+            (),
+            {
+                "func": type("F", (), {"__name__": "imu_ang_vel"})(),
+                "params": {"sensor_cfg": {"name": "imu"}},
+            },
+        )()
+        policy = type("P", (), {"imu": imu, "height_scan": None})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": None, "robot": robot},
+                )(),
+                "observations": type("Obs", (), {"policy": policy})(),
+                "actions": type("Act", (), {"joint_pos": joint_pos})(),
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.assertTrue(self.rt.leftover_quadruped_actuators(cfg))
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertNotIn("base_legs", actuators)
+        self.assertTrue(spawn.activate_contact_sensors)
+        self.assertNotIn(".*HAA", joint_pos.scale)
+        self.assertEqual(joint_pos.scale[".*_hip_yaw"], 0.25)
+        self.assertNotIn(".*_calf_joint", robot.init_state.joint_pos)
+        self.assertIsNone(policy.imu)
+
+    def test_leftover_h1_maps_on_g1_and_g1_maps_on_h1(self):
+        g1_usd = "/Isaac/Robots/Unitree/G1/g1_minimal.usd"
+        h1_usd = "/Isaac/Robots/Unitree/H1/h1_minimal.usd"
+        g1_robot = type(
+            "R",
+            (),
+            {
+                "usd_path": g1_usd,
+                "init_state": type(
+                    "S",
+                    (),
+                    {
+                        "pos": (0.0, 0.0, 0.74),
+                        "joint_pos": {
+                            ".*_hip_pitch": -0.28,
+                            ".*_knee": 0.79,
+                            "torso": 0.0,
+                            ".*_shoulder_pitch": 0.28,
+                            "left_hip_pitch_joint": -0.20,
+                            ".*": 0.0,
+                        },
+                    },
+                )(),
+                "actuators": {
+                    "legs": type(
+                        "A",
+                        (),
+                        {
+                            "joint_names_expr": [".*_hip_yaw", ".*_hip_pitch", ".*_knee", "torso"],
+                            "stiffness": {".*_hip_pitch": 200.0, "torso": 200.0},
+                        },
+                    )(),
+                    "all": type("A", (), {"joint_names_expr": [".*"], "stiffness": {".*": 40.0}})(),
+                },
+            },
+        )()
+        g1_joint_pos = type("J", (), {"scale": {".*_hip_pitch": 0.25, ".*": 0.25}, "offset": None})()
+        g1_cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": None, "robot": g1_robot},
+                )(),
+                "observations": None,
+                "actions": type("Act", (), {"joint_pos": g1_joint_pos})(),
+                "commands": None,
+                "sim": None,
+                "rewards": type("Rew", (), {"joint_deviation_fingers": None})(),
+            },
+        )()
+        self.assertTrue(self.rt.leftover_wrong_robot_joint_key(".*_hip_pitch", g1_cfg))
+        self.assertTrue(self.rt.leftover_wrong_robot_joint_key(".*_knee", g1_cfg))
+        self.assertTrue(self.rt.leftover_wrong_robot_joint_key("torso", g1_cfg))
+        self.assertFalse(self.rt.leftover_wrong_robot_joint_key(".*", g1_cfg))
+        self.assertFalse(self.rt.leftover_wrong_robot_joint_key("left_hip_pitch_joint", g1_cfg))
+        self.assertTrue(self.rt.leftover_wrong_robot_actuators(g1_cfg))
+        self.assertFalse(self.rt.leftover_wrong_robot_actuator(g1_robot.actuators["all"], g1_cfg))
+        self.rt.reassert_gpu_env_cfg(g1_cfg)
+        self.assertNotIn(".*_hip_pitch", g1_robot.init_state.joint_pos)
+        self.assertNotIn(".*_knee", g1_robot.init_state.joint_pos)
+        self.assertNotIn("torso", g1_robot.init_state.joint_pos)
+        self.assertNotIn(".*_shoulder_pitch", g1_robot.init_state.joint_pos)
+        self.assertEqual(g1_robot.init_state.joint_pos["left_hip_pitch_joint"], -0.20)
+        self.assertEqual(g1_robot.init_state.joint_pos[".*"], 0.0)
+        self.assertNotIn("legs", g1_robot.actuators)
+        self.assertIn("all", g1_robot.actuators)
+        self.assertNotIn(".*_hip_pitch", g1_joint_pos.scale)
+        self.assertEqual(g1_joint_pos.scale[".*"], 0.25)
+
+        h1_robot = type(
+            "R",
+            (),
+            {
+                "usd_path": h1_usd,
+                "init_state": type(
+                    "S",
+                    (),
+                    {
+                        "pos": (0.0, 0.0, 1.05),
+                        "joint_pos": {
+                            ".*_hip_pitch_joint": -0.20,
+                            "left_one_joint": 1.0,
+                            ".*_hip_pitch": -0.28,
+                            ".*": 0.0,
+                        },
+                    },
+                )(),
+                "actuators": {
+                    "legs": type(
+                        "A",
+                        (),
+                        {
+                            "joint_names_expr": [".*_hip_yaw", ".*_hip_pitch", ".*_knee", "torso"],
+                            "stiffness": {".*_hip_pitch": 200.0},
+                        },
+                    )(),
+                    "g1_legs": type("A", (), {"joint_names_expr": [".*_hip_pitch_joint", ".*_knee_joint"]})(),
+                },
+            },
+        )()
+        h1_joint_pos = type("J", (), {"scale": {".*_hip_pitch_joint": 0.25, ".*_hip_pitch": 0.25}, "offset": None})()
+        h1_cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": None, "robot": h1_robot},
+                )(),
+                "observations": None,
+                "actions": type("Act", (), {"joint_pos": h1_joint_pos})(),
+                "commands": None,
+                "sim": None,
+                "rewards": type("Rew", (), {"joint_deviation_fingers": None})(),
+            },
+        )()
+        self.assertTrue(self.rt.leftover_wrong_robot_joint_key(".*_hip_pitch_joint", h1_cfg))
+        self.assertFalse(self.rt.leftover_wrong_robot_joint_key(".*_hip_pitch", h1_cfg))
+        self.assertTrue(self.rt.leftover_wrong_robot_actuators(h1_cfg))
+        self.assertFalse(self.rt.leftover_wrong_robot_actuator(h1_robot.actuators["legs"], h1_cfg))
+        self.rt.reassert_gpu_env_cfg(h1_cfg)
+        self.assertNotIn(".*_hip_pitch_joint", h1_robot.init_state.joint_pos)
+        self.assertNotIn("left_one_joint", h1_robot.init_state.joint_pos)
+        self.assertEqual(h1_robot.init_state.joint_pos[".*_hip_pitch"], -0.28)
+        self.assertEqual(h1_robot.init_state.joint_pos[".*"], 0.0)
+        self.assertIn("legs", h1_robot.actuators)
+        self.assertNotIn("g1_legs", h1_robot.actuators)
+        self.assertNotIn(".*_hip_pitch_joint", h1_joint_pos.scale)
+        self.assertEqual(h1_joint_pos.scale[".*_hip_pitch"], 0.25)
+
+    def test_env_cfg_stage_ignores_leftover_stage1_catcher(self):
+        stage1 = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {"scene": type("S", (), {"catcher": object(), "task_stone_0": None})()},
+        )()
+        stage2 = type("BeamDojoStage2EnvCfg", (), {"scene": type("S", (), {"catcher": None})()})()
+        unnamed = type("Cfg", (), {"scene": type("S", (), {"catcher": object()})()})()
+        self.assertEqual(self.rt.env_cfg_stage(stage1), 1)
+        self.assertEqual(self.rt.env_cfg_stage(stage2), 2)
+        self.assertEqual(self.rt.env_cfg_stage(unnamed), 2)
+        self.assertTrue(self.rt.leftover_rigid_catcher(type("RigidObjectCfg", (), {})()))
+        self.assertFalse(self.rt.leftover_rigid_catcher(object()))
+        self.assertTrue(self.rt.leftover_uncloned_prim_path("/World/Robot"))
+        self.assertFalse(self.rt.leftover_uncloned_prim_path("{ENV_REGEX_NS}/Robot"))
+        self.assertTrue(self.rt.leftover_asset_base_task_beam(type("AssetBaseCfg", (), {})()))
+        self.assertFalse(self.rt.leftover_asset_base_task_beam(type("RigidObjectCfg", (), {})()))
+        self.assertTrue(
+            self.rt.leftover_disabled_replicate_physics(type("S", (), {"replicate_physics": False})())
+        )
+        self.assertFalse(
+            self.rt.leftover_disabled_replicate_physics(type("S", (), {"replicate_physics": True})())
+        )
+        self.assertTrue(self.rt.env_cfg_uses_stones(type("BeamDojoStage2StonesEnvCfg", (), {"scene": None})()))
+        self.assertFalse(
+            self.rt.env_cfg_uses_stones(
+                type("BeamDojoStage2EnvCfg", (), {"scene": type("S", (), {"task_stone_0": None})()})()
+            )
+        )
+        nocol = type(
+            "RigidObjectCfg",
+            (),
+            {"spawn": type("Sp", (), {"collision_props": type("P", (), {"collision_enabled": False})()})()},
+        )()
+        self.assertTrue(self.rt.leftover_disabled_collision_asset(nocol))
+        self.assertFalse(
+            self.rt.leftover_disabled_collision_asset(
+                type(
+                    "RigidObjectCfg",
+                    (),
+                    {"spawn": type("Sp", (), {"collision_props": type("P", (), {"collision_enabled": True})()})()},
+                )()
+            )
+        )
+        self.assertTrue(self.rt.leftover_invalid_root_rot((0.0, 0.0, 0.0, 0.0)))
+        self.assertTrue(self.rt.leftover_invalid_root_rot((1.0, 0.0)))
+        self.assertFalse(self.rt.leftover_invalid_root_rot((1.0, 0.0, 0.0, 0.0)))
+        self.assertTrue(self.rt.leftover_nucleus_path("omniverse://nucleus/Materials/foo.mdl"))
+        self.assertFalse(self.rt.leftover_nucleus_path("/Isaac/Robots/Unitree/H1/h1_minimal.usd"))
+        cam_scene = type("S", (), {"tiled_camera": object(), "filter_collisions": False, "num_envs": 0})()
+        self.assertEqual(self.rt.leftover_scene_camera_fields(cam_scene), ["tiled_camera"])
+        self.assertTrue(self.rt.leftover_unfiltered_collisions(cam_scene))
+        self.assertTrue(self.rt.leftover_zero_num_envs(cam_scene))
+        self.assertTrue(
+            self.rt.leftover_missing_scene_entity_term(
+                type("T", (), {"params": {"sensor_cfg": {"name": "height_scanner"}}})(),
+                {"robot", "contact_forces", "terrain"},
+            )
+        )
+        self.assertFalse(
+            self.rt.leftover_missing_scene_entity_term(
+                type("T", (), {"params": {"asset_cfg": {"name": "robot"}}})(),
+                {"robot", "contact_forces", "terrain"},
+            )
+        )
+        self.assertTrue(self.rt.leftover_contact_filter_prims(type("C", (), {"filter_prim_paths_expr": ["{ENV_REGEX_NS}/Terrain"]})()))
+        self.assertTrue(self.rt.leftover_contact_filter_prims(type("C", (), {"filter_prim_paths_expr": None})()))
+        self.assertFalse(self.rt.leftover_contact_filter_prims(type("C", (), {"filter_prim_paths_expr": []})()))
+        self.assertTrue(self.rt.leftover_wrong_contact_prim("{ENV_REGEX_NS}/Robot/base"))
+        self.assertTrue(self.rt.leftover_wrong_contact_prim("{ENV_REGEX_NS}/Robot/LF_FOOT"))
+        self.assertFalse(self.rt.leftover_wrong_contact_prim("{ENV_REGEX_NS}/Robot/.*"))
+        self.assertTrue(self.rt.leftover_track_contact_points(type("C", (), {"track_contact_points": True})()))
+        self.assertTrue(self.rt.leftover_zero_contact_data_count(type("C", (), {"max_contact_data_count_per_prim": 0})()))
+        self.assertTrue(self.rt.leftover_invalid_env_spacing(type("S", (), {"env_spacing": None})()))
+        self.assertTrue(self.rt.leftover_invalid_env_spacing(type("S", (), {"env_spacing": 2.5})()))
+        self.assertFalse(self.rt.leftover_invalid_env_spacing(type("S", (), {"env_spacing": 6.0})()))
+        self.assertTrue(self.rt.leftover_excess_num_envs(type("S", (), {"num_envs": 4096})()))
+        self.assertFalse(self.rt.leftover_excess_num_envs(type("S", (), {"num_envs": 1024})()))
+        self.assertFalse(self.rt.leftover_excess_num_envs(type("S", (), {"num_envs": 64})()))
+        self.assertTrue(self.rt.leftover_clone_in_fabric(type("S", (), {"clone_in_fabric": True})()))
+        self.assertFalse(self.rt.leftover_clone_in_fabric(type("S", (), {"clone_in_fabric": False})()))
+        self.assertTrue(self.rt.leftover_stage_in_memory(type("Sim", (), {"create_stage_in_memory": True})()))
+        empty_scene = type("S", (), {"robot": None, "terrain": None, "contact_forces": None})()
+        self.assertTrue(self.rt.leftover_missing_robot(empty_scene))
+        self.assertTrue(self.rt.leftover_missing_terrain(empty_scene))
+        self.assertTrue(self.rt.leftover_missing_contact_forces(empty_scene))
+        self.assertNotIn("contact_forces", self.rt._scene_entity_names(type("C", (), {"scene": empty_scene})()))
+        self.assertTrue(self.rt.leftover_invalid_command_frac(None))
+        self.assertTrue(self.rt.leftover_invalid_command_frac(1.5))
+        self.assertTrue(self.rt.leftover_invalid_command_frac(float("nan")))
+        self.assertFalse(self.rt.leftover_invalid_command_frac(0.5))
+        self.assertTrue(self.rt.leftover_wrong_scene_asset_name(None))
+        self.assertTrue(self.rt.leftover_wrong_scene_asset_name(""))
+        self.assertTrue(self.rt.leftover_wrong_scene_asset_name("anymal"))
+        self.assertFalse(self.rt.leftover_wrong_scene_asset_name("robot"))
+        missing_cmd = type("C", (), {"commands": None, "actions": None})()
+        self.assertTrue(self.rt.leftover_missing_base_velocity(missing_cmd))
+        self.assertTrue(self.rt.leftover_missing_joint_pos_action(missing_cmd))
+        self.assertFalse(
+            self.rt.leftover_missing_base_velocity(
+                type("C", (), {"commands": type("Cmd", (), {"base_velocity": object()})()})()
+            )
+        )
+        self.assertTrue(self.rt.leftover_invalid_rel_frac(type("V", (), {})(), "rel_standing_envs"))
+        self.assertTrue(self.rt.leftover_invalid_rel_frac(type("V", (), {"rel_heading_envs": None})(), "rel_heading_envs"))
+        self.assertFalse(self.rt.leftover_invalid_rel_frac(type("V", (), {"rel_standing_envs": 0.5})(), "rel_standing_envs"))
+        self.assertTrue(self.rt.leftover_missing_class_type(type("T", (), {"class_type": None})()))
+        self.assertFalse(self.rt.leftover_missing_class_type(type("T", (), {"class_type": object})()))
+        self.assertTrue(self.rt.leftover_wait_for_textures(type("Sim", (), {"wait_for_textures": True})()))
+        self.assertFalse(self.rt.leftover_wait_for_textures(type("Sim", (), {"wait_for_textures": False})()))
+        self.assertTrue(self.rt.leftover_missing_policy_obs(type("C", (), {"observations": None})()))
+        self.assertTrue(
+            self.rt.leftover_missing_policy_obs(
+                type("C", (), {"observations": type("O", (), {"policy": None})()})()
+            )
+        )
+        self.assertFalse(
+            self.rt.leftover_missing_policy_obs(
+                type("C", (), {"observations": type("O", (), {"policy": object()})()})()
+            )
+        )
+        self.assertTrue(
+            self.rt.leftover_empty_policy_obs(
+                type("C", (), {"observations": type("O", (), {"policy": object()})()})()
+            )
+        )
+        self.assertFalse(
+            self.rt.leftover_empty_policy_obs(
+                type(
+                    "C",
+                    (),
+                    {
+                        "observations": type(
+                            "O",
+                            (),
+                            {"policy": type("P", (), {"base_lin_vel": type("T", (), {"func": object()})()})()},
+                        )()
+                    },
+                )()
+            )
+        )
+        self.assertFalse(self.rt.leftover_empty_policy_obs(type("C", (), {"observations": None})()))
+        self.assertTrue(self.rt.leftover_excess_obs_history(24))
+        self.assertTrue(self.rt.leftover_excess_obs_history(-1))
+        self.assertFalse(self.rt.leftover_excess_obs_history(0))
+        self.assertFalse(self.rt.leftover_excess_obs_history(None))
+        self.assertTrue(self.rt.leftover_invalid_obs_history(None))
+        self.assertTrue(self.rt.leftover_invalid_obs_history(24))
+        self.assertFalse(self.rt.leftover_invalid_obs_history(0))
+        self.assertTrue(self.rt.leftover_invalid_concatenate_dim(None))
+        self.assertFalse(self.rt.leftover_invalid_concatenate_dim(-1))
+        self.assertTrue(self.rt.leftover_missing_physics_material(type("Sim", (), {"physics_material": None})()))
+        self.assertFalse(self.rt.leftover_missing_physics_material(type("Sim", (), {"physics_material": object()})()))
+        self.assertTrue(self.rt.leftover_invalid_action_scale(None))
+        self.assertTrue(self.rt.leftover_invalid_action_scale(0.0))
+        self.assertFalse(self.rt.leftover_invalid_action_scale(0.25))
+        self.assertFalse(self.rt.leftover_invalid_action_scale({".*": 0.25}))
+        self.assertTrue(self.rt.leftover_invalid_action_offset(None))
+        self.assertFalse(self.rt.leftover_invalid_action_offset(0.0))
+        self.assertFalse(self.rt.leftover_invalid_action_offset({".*": 0.0}))
+        self.assertTrue(self.rt.leftover_invalid_action_clip((None, None)))
+        self.assertTrue(self.rt.leftover_invalid_action_clip((-1.0, 1.0)))
+        self.assertFalse(self.rt.leftover_invalid_action_clip(None))
+        self.assertFalse(self.rt.leftover_invalid_action_clip({".*": (-1.0, 1.0)}))
+        self.assertTrue(self.rt.leftover_missing_term_func(type("T", (), {"func": None})()))
+        self.assertFalse(self.rt.leftover_missing_term_func(type("T", (), {"func": object()})()))
+        self.assertFalse(self.rt.leftover_missing_term_func(object()))
+        catcher_props = type("P", (), {"kinematic_enabled": True, "disable_gravity": True})()
+        robot_art = type("A", (), {"fix_root_link": True, "enabled_self_collisions": True})()
+        leftover_robot = type(
+            "R",
+            (),
+            {
+                "spawn": type(
+                    "Sp",
+                    (),
+                    {"rigid_props": catcher_props, "articulation_props": robot_art},
+                )()
+            },
+        )()
+        self.assertTrue(self.rt.leftover_kinematic_robot(leftover_robot))
+        self.assertTrue(self.rt.leftover_disabled_gravity_robot(leftover_robot))
+        self.assertTrue(self.rt.leftover_fixed_root_robot(leftover_robot))
+        self.assertTrue(self.rt.leftover_self_collisions_robot(leftover_robot))
+        self.assertFalse(
+            self.rt.leftover_kinematic_robot(
+                type("R", (), {"spawn": type("Sp", (), {"rigid_props": type("P", (), {"kinematic_enabled": False})()})()})()
+            )
+        )
+        self.assertTrue(self.rt.leftover_missing_sim(type("C", (), {"sim": None})()))
+        self.assertFalse(self.rt.leftover_missing_sim(type("C", (), {"sim": object()})()))
+        self.assertTrue(self.rt.leftover_missing_rewards(type("C", (), {"rewards": None})()))
+        self.assertTrue(self.rt.leftover_missing_events(type("C", (), {"events": None})()))
+        self.assertTrue(self.rt.leftover_missing_terminations(type("C", (), {"terminations": None})()))
+        self.assertTrue(self.rt.leftover_missing_time_out(type("C", (), {"terminations": None})()))
+        self.assertTrue(self.rt.leftover_invalid_obs_scale(None))
+        self.assertTrue(self.rt.leftover_invalid_obs_scale(0.0))
+        self.assertTrue(self.rt.leftover_invalid_obs_scale({".*": 1.0}))
+        self.assertFalse(self.rt.leftover_invalid_obs_scale(2.0))
+        self.assertFalse(self.rt.leftover_invalid_obs_scale((1.0, 1.0)))
+        self.assertTrue(self.rt.leftover_invalid_obs_modifiers([type("M", (), {"params": None})()]))
+        self.assertTrue(self.rt.leftover_invalid_obs_modifiers("walk"))
+        self.assertFalse(self.rt.leftover_invalid_obs_modifiers(None))
+        self.assertFalse(self.rt.leftover_invalid_obs_modifiers([type("M", (), {"params": {}})()]))
+        self.assertTrue(self.rt.leftover_enabled_action_debug_vis(True))
+        self.assertTrue(self.rt.leftover_enabled_action_debug_vis(None))
+        self.assertFalse(self.rt.leftover_enabled_action_debug_vis(False))
+        self.assertTrue(self.rt.leftover_invalid_runner_interval(-1))
+        self.assertTrue(self.rt.leftover_invalid_runner_interval(0))
+        self.assertTrue(self.rt.leftover_invalid_runner_interval(None))
+        self.assertFalse(self.rt.leftover_invalid_runner_interval(24))
+        self.assertTrue(self.rt.leftover_invalid_obs_clip((None, None)))
+        self.assertFalse(self.rt.leftover_invalid_obs_clip((-1.0, 1.0)))
+        self.assertFalse(self.rt.leftover_invalid_obs_clip(None))
+        self.assertTrue(self.rt.leftover_disabled_fabric(type("Sim", (), {"use_fabric": False})()))
+        self.assertFalse(self.rt.leftover_disabled_fabric(type("Sim", (), {"use_fabric": True})()))
+        self.assertTrue(self.rt.leftover_missing_scene(type("C", (), {"scene": None})()))
+        self.assertTrue(self.rt.leftover_missing_reset_base(type("C", (), {"events": None})()))
+        self.assertTrue(
+            self.rt.leftover_missing_reset_joints(
+                type("C", (), {"events": type("E", (), {"reset_base": object()})()})()
+            )
+        )
+        self.assertTrue(self.rt.leftover_disabled_contact_processing(type("Sim", (), {"disable_contact_processing": True})()))
+        self.assertFalse(self.rt.leftover_disabled_contact_processing(type("Sim", (), {"disable_contact_processing": False})()))
+        self.assertTrue(self.rt.leftover_missing_physx(type("Sim", (), {"physx": None})()))
+        self.assertFalse(self.rt.leftover_missing_physx(type("Sim", (), {"physx": object()})()))
+        self.assertTrue(
+            self.rt.leftover_incomplete_physx(type("Sim", (), {"physx": type("P", (), {"enable_ccd": None})()})())
+        )
+        self.assertTrue(self.rt.leftover_incomplete_physx(type("Sim", (), {"physx": object()})()))
+        self.assertFalse(self.rt.leftover_incomplete_physx(type("Sim", (), {"physx": None})()))
+        complete = type("P", (), dict(self.rt.PHYSX_CONTEXT_DEFAULTS))()
+        self.assertFalse(self.rt.leftover_incomplete_physx(type("Sim", (), {"physx": complete})()))
+        self.assertTrue(self.rt.leftover_invalid_gravity(type("Sim", (), {"gravity": None})()))
+        self.assertFalse(self.rt.leftover_invalid_gravity(type("Sim", (), {"gravity": (0.0, 0.0, -9.81)})()))
+        self.assertTrue(self.rt.leftover_invalid_obs_noise(type("N", (), {"n_min": None, "n_max": 0.1})()))
+        self.assertFalse(self.rt.leftover_invalid_obs_noise(type("N", (), {"n_min": -0.1, "n_max": 0.1})()))
+        self.assertFalse(self.rt.leftover_invalid_obs_noise(None))
+        self.assertTrue(self.rt.leftover_invalid_event_mode(type("T", (), {"mode": None})()))
+        self.assertTrue(self.rt.leftover_invalid_event_mode(type("T", (), {"mode": "prestartup"})()))
+        self.assertFalse(self.rt.leftover_invalid_event_mode(type("T", (), {"mode": "reset"})()))
+        self.assertFalse(self.rt.leftover_invalid_event_mode(object()))
+        self.assertTrue(
+            self.rt.leftover_invalid_interval_event(type("T", (), {"mode": "interval", "interval_range_s": None})())
+        )
+        self.assertFalse(
+            self.rt.leftover_invalid_interval_event(type("T", (), {"mode": "interval", "interval_range_s": (2.0, 4.0)})())
+        )
+        self.assertTrue(self.rt.leftover_invalid_min_step_count(type("T", (), {"min_step_count_between_reset": None})()))
+        self.assertTrue(self.rt.leftover_invalid_min_step_count(type("T", (), {"min_step_count_between_reset": -1})()))
+        self.assertFalse(self.rt.leftover_invalid_min_step_count(type("T", (), {"min_step_count_between_reset": 0})()))
+        self.assertFalse(self.rt.leftover_invalid_min_step_count(object()))
+        self.assertTrue(self.rt.leftover_invalid_term_params(type("T", (), {"params": None})()))
+        self.assertFalse(self.rt.leftover_invalid_term_params(type("T", (), {"params": {}})()))
+        self.assertFalse(self.rt.leftover_invalid_term_params(object()))
+        self.assertTrue(self.rt.leftover_invalid_reward_weight(type("T", (), {"weight": None})()))
+        self.assertFalse(self.rt.leftover_invalid_reward_weight(type("T", (), {"weight": 1.0})()))
+        self.assertFalse(self.rt.leftover_invalid_reward_weight(type("T", (), {"weight": 0})()))
+        self.assertFalse(self.rt.leftover_invalid_reward_weight(object()))
+        h1_act = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type("S", (), {"robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})()})(),
+                "actions": type("A", (), {"joint_pos": type("J", (), {"joint_names": [".*HAA", ".*HFE"]})()})(),
+            },
+        )()
+        self.assertTrue(self.rt.leftover_wrong_action_joint_names(h1_act))
+        self.assertFalse(
+            self.rt.leftover_wrong_action_joint_names(
+                type(
+                    "BeamDojoStage1EnvCfg",
+                    (),
+                    {
+                        "scene": type("S", (), {"robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})()})(),
+                        "actions": type("A", (), {"joint_pos": type("J", (), {"joint_names": [".*"]})()})(),
+                    },
+                )()
+            )
+        )
+        self.assertTrue(
+            self.rt.leftover_wrong_event_joint_names(
+                type("T", (), {"params": {"asset_cfg": {"joint_names": [".*HAA"]}}})(),
+                h1_act,
+            )
+        )
+
+    def test_leftover_stage_catcher_and_uncloned_prims(self):
+        robot = type("R", (), {"prim_path": "/World/Robot", "usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})()
+        contact = type("C", (), {"prim_path": "/World/Robot/.*", "history_length": 3, "track_air_time": True})()
+        beam = type("B", (), {"prim_path": "/World/TaskBeam"})()
+        terms = type("Term", (), {"base_contact": object(), "base_height": object()})()
+        stage1 = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": object(),
+                        "robot": robot,
+                        "contact_forces": contact,
+                        "task_beam": beam,
+                    },
+                )(),
+                "observations": None,
+                "commands": type(
+                    "Cmd",
+                    (),
+                    {"base_velocity": type("V", (), {"resampling_time_range": None, "ranges": None})()},
+                )(),
+                "sim": None,
+                "terminations": terms,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(stage1)
+        self.assertIsNone(stage1.scene.catcher)
+        self.assertIsNone(terms.base_contact)
+        self.assertEqual(robot.prim_path, "{ENV_REGEX_NS}/Robot")
+        self.assertEqual(contact.prim_path, "{ENV_REGEX_NS}/Robot/.*")
+        self.assertEqual(beam.prim_path, "{ENV_REGEX_NS}/TaskBeam")
+        self.assertEqual(stage1.commands.base_velocity.resampling_time_range, (10.0, 10.0))
+
+        rigid = type("RigidObjectCfg", (), {"prim_path": "/World/catcher"})()
+        stage2 = type(
+            "BeamDojoStage2EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": rigid, "robot": None},
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(stage2)
+        self.assertFalse(self.rt.leftover_rigid_catcher(stage2.scene.catcher))
+        self.assertEqual(getattr(stage2.scene.catcher, "prim_path", None), "/World/catcher")
+
+        missing = type(
+            "BeamDojoStage2EnvCfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(missing)
+        self.assertIsNotNone(missing.scene.catcher)
+        self.assertEqual(missing.scene.catcher.prim_path, "/World/catcher")
+        self.assertIsNotNone(missing.scene.task_beam)
+        self.assertIn("RigidObject", type(missing.scene.task_beam).__name__)
+
+        leftover_beam = type("AssetBaseCfg", (), {"prim_path": "{ENV_REGEX_NS}/TaskBeam"})()
+        scene2 = type(
+            "Scene",
+            (),
+            {
+                "height_scanner": None,
+                "terrain": None,
+                "catcher": None,
+                "task_beam": leftover_beam,
+                "task_stone_0": None,
+                "replicate_physics": False,
+            },
+        )()
+        asset_beam = type(
+            "BeamDojoStage2EnvCfg",
+            (),
+            {
+                "scene": scene2,
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(asset_beam)
+        self.assertIn("RigidObject", type(asset_beam.scene.task_beam).__name__)
+        self.assertTrue(asset_beam.scene.replicate_physics)
+
+        stones = type(
+            "BeamDojoStage2EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "task_beam": leftover_beam,
+                        "task_stone_0": object(),
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(stones)
+        self.assertIsNone(stones.scene.task_beam)
+
+        visual = type(
+            "RigidObjectCfg",
+            (),
+            {
+                "prim_path": "{ENV_REGEX_NS}/TaskBeam",
+                "spawn": type("Sp", (), {"collision_props": type("P", (), {"collision_enabled": False})()})(),
+            },
+        )()
+        visual_cfg = type(
+            "BeamDojoStage2EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "task_beam": visual,
+                        "task_stone_0": None,
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(visual_cfg)
+        self.assertIsNot(visual_cfg.scene.task_beam, visual)
+        self.assertIn("RigidObject", type(visual_cfg.scene.task_beam).__name__)
+
+        missing_stones = type(
+            "BeamDojoStage2StonesEnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "task_beam": visual,
+                        "task_stone_0": None,
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(missing_stones)
+        self.assertIsNone(missing_stones.scene.task_beam)
+        self.assertTrue(self.rt.env_cfg_uses_stones(missing_stones))
+        for index in range(24):
+            stone = getattr(missing_stones.scene, f"task_stone_{index}")
+            self.assertIsNotNone(stone)
+            self.assertIn("RigidObject", type(stone).__name__)
+
+        rot_state = type("S", (), {"pos": (0.0, 0.0, 1.05), "rot": (0.0, 0.0, 0.0, 0.0)})()
+        mat = type("M", (), {"mdl_path": "omniverse://nucleus/Materials/foo.mdl"})()
+        spawn = type("Sp", (), {"visual_material": mat, "activate_contact_sensors": True})()
+        rot_robot = type(
+            "R",
+            (),
+            {
+                "usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd",
+                "init_state": rot_state,
+                "spawn": spawn,
+            },
+        )()
+        rot_cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {"height_scanner": None, "terrain": None, "catcher": None, "robot": rot_robot},
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(rot_cfg)
+        self.assertEqual(rot_state.rot, (1.0, 0.0, 0.0, 0.0))
+        self.assertIsNone(spawn.visual_material)
+
+        props = type("P", (), {"collision_enabled": False})()
+        robot_spawn = type("Sp", (), {"collision_props": props, "activate_contact_sensors": True})()
+        cam_robot = type(
+            "R",
+            (),
+            {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd", "spawn": robot_spawn},
+        )()
+        scan_event = type("T", (), {"params": {"sensor_cfg": {"name": "height_scanner"}}})()
+        cam_cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": cam_robot,
+                        "tiled_camera": object(),
+                        "filter_collisions": False,
+                        "num_envs": 0,
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "events": type("Ev", (), {"randomize_scanner": scan_event})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cam_cfg)
+        self.assertIsNone(cam_cfg.scene.tiled_camera)
+        self.assertTrue(cam_cfg.scene.filter_collisions)
+        self.assertEqual(cam_cfg.scene.num_envs, 1024)
+        self.assertTrue(props.collision_enabled)
+        self.assertIsNone(cam_cfg.events.randomize_scanner)
+
+        contact = type(
+            "C",
+            (),
+            {
+                "prim_path": "{ENV_REGEX_NS}/Robot/base",
+                "filter_prim_paths_expr": ["{ENV_REGEX_NS}/Terrain", "{ENV_REGEX_NS}/Robot/LF_FOOT"],
+                "track_contact_points": True,
+                "max_contact_data_count_per_prim": 0,
+                "history_length": 3,
+                "track_air_time": True,
+            },
+        )()
+        joint_pos = type("J", (), {"joint_names": [".*HAA", ".*HFE", ".*KFE"]})()
+        gains = type("T", (), {"params": {"asset_cfg": type("E", (), {"joint_names": [".*HAA"]})()}})()
+        filter_cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "env_spacing": None,
+                        "robot": type(
+                            "R",
+                            (),
+                            {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"},
+                        )(),
+                        "contact_forces": contact,
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "actions": type("A", (), {"joint_pos": joint_pos})(),
+                "events": type("Ev", (), {"actuator_gains": gains})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(filter_cfg)
+        self.assertEqual(contact.filter_prim_paths_expr, [])
+        self.assertFalse(contact.track_contact_points)
+        self.assertEqual(contact.max_contact_data_count_per_prim, 4)
+        self.assertEqual(contact.prim_path, "{ENV_REGEX_NS}/Robot/.*")
+        self.assertEqual(joint_pos.joint_names, [".*"])
+        self.assertEqual(gains.params["asset_cfg"].joint_names, [".*"])
+        self.assertEqual(filter_cfg.scene.env_spacing, 8.0)
+
+        none_filter = type("C", (), {"filter_prim_paths_expr": None, "prim_path": "{ENV_REGEX_NS}/Robot/.*"})()
+        none_cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "contact_forces": none_filter,
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(none_cfg)
+        self.assertEqual(none_filter.filter_prim_paths_expr, [])
+
+        play_space = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "env_spacing": 6.0,
+                        "num_envs": 64,
+                        "robot": type(
+                            "R",
+                            (),
+                            {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"},
+                        )(),
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(play_space)
+        self.assertEqual(play_space.scene.env_spacing, 6.0)
+        self.assertEqual(play_space.scene.num_envs, 64)
+
+        from h1_cfg.robot_spec import G1
+
+        g1_joint_pos = type("J", (), {"joint_names": [".*_hip_yaw", ".*_hip_roll"]})()
+        g1_cfg = type(
+            "BeamDojoStage1G1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type(
+                            "R",
+                            (),
+                            {"usd_path": "/Isaac/Robots/Unitree/G1/g1_minimal.usd"},
+                        )(),
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "rewards": type("Rew", (), {"joint_deviation_fingers": object()})(),
+                "actions": type("A", (), {"joint_pos": g1_joint_pos})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(g1_cfg)
+        self.assertEqual(g1_joint_pos.joint_names, list(G1.action_joints))
+
+        missing = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": None,
+                        "contact_forces": None,
+                        "num_envs": 4096,
+                        "clone_in_fabric": True,
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": type("Sim", (), {"create_stage_in_memory": True})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(missing)
+        self.assertEqual(missing.scene.num_envs, 1024)
+        self.assertFalse(missing.scene.clone_in_fabric)
+        self.assertFalse(missing.sim.create_stage_in_memory)
+        self.assertIsNotNone(missing.scene.robot)
+        self.assertIn("h1_minimal.usd", str(getattr(missing.scene.robot, "usd_path", "")))
+        self.assertIsNotNone(missing.scene.terrain)
+        self.assertEqual(getattr(missing.scene.terrain, "terrain_type", None), "plane")
+        self.assertIsNotNone(missing.scene.contact_forces)
+        self.assertEqual(missing.scene.contact_forces.prim_path, "{ENV_REGEX_NS}/Robot/.*")
+        self.assertEqual(missing.scene.contact_forces.history_length, 3)
+
+    def test_leftover_velocity_command_and_joint_pos_are_restored(self):
+        from h1_cfg.robot_spec import G1
+
+        cmd = type(
+            "V",
+            (),
+            {
+                "rel_standing_envs": None,
+                "rel_heading_envs": float("nan"),
+                "asset_name": "anymal",
+                "class_type": None,
+                "heading_command": True,
+                "ranges": type("R", (), {"heading": None})(),
+            },
+        )()
+        sim = type("Sim", (), {"wait_for_textures": True, "dt": 0.005, "device": "cuda:0", "render_interval": 4})()
+        stage2 = type(
+            "BeamDojoStage2EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})(),
+                    },
+                )(),
+                "observations": None,
+                "commands": type("Cmd", (), {"base_velocity": cmd})(),
+                "actions": type("A", (), {"joint_pos": type("J", (), {"asset_name": "Robot", "joint_names": [".*"]})()})(),
+                "sim": sim,
+                "decimation": 4,
+                "episode_length_s": 20,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(stage2)
+        self.assertEqual(cmd.rel_standing_envs, 0.1)
+        self.assertEqual(cmd.rel_heading_envs, 0.0)
+        self.assertEqual(cmd.asset_name, "robot")
+        self.assertFalse(cmd.heading_command)
+        self.assertFalse(cmd.debug_vis)
+        self.assertIsNotNone(cmd.class_type)
+        self.assertEqual(stage2.actions.joint_pos.asset_name, "robot")
+        self.assertIsNotNone(stage2.actions.joint_pos.class_type)
+        self.assertFalse(sim.wait_for_textures)
+
+        missing = type(
+            "BeamDojoStage1G1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/G1/g1_minimal.usd"})(),
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "actions": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(missing)
+        self.assertIsNotNone(missing.commands.base_velocity)
+        self.assertEqual(missing.commands.base_velocity.rel_standing_envs, 0.5)
+        self.assertEqual(missing.commands.base_velocity.rel_heading_envs, 0.0)
+        self.assertEqual(missing.commands.base_velocity.asset_name, "robot")
+        self.assertFalse(missing.commands.base_velocity.heading_command)
+        self.assertIsNotNone(missing.actions.joint_pos)
+        self.assertEqual(missing.actions.joint_pos.joint_names, list(G1.action_joints))
+        self.assertEqual(missing.actions.joint_pos.asset_name, "robot")
+        self.assertEqual(missing.actions.joint_pos.scale, 0.25)
+
+        nulled_joint = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})(),
+                    },
+                )(),
+                "observations": None,
+                "commands": type("Cmd", (), {"base_velocity": None})(),
+                "actions": type("A", (), {"joint_pos": None})(),
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(nulled_joint)
+        self.assertIsNotNone(nulled_joint.commands.base_velocity)
+        self.assertEqual(nulled_joint.commands.base_velocity.rel_standing_envs, 0.5)
+        self.assertIsNotNone(nulled_joint.actions.joint_pos)
+        self.assertEqual(nulled_joint.actions.joint_pos.joint_names, [".*"])
+
+    def test_leftover_policy_obs_history_and_action_scale_are_restored(self):
+        policy = type(
+            "P",
+            (),
+            {
+                "history_length": 24,
+                "base_lin_vel": type("T", (), {"func": None, "history_length": 8})(),
+                "base_ang_vel": type("T", (), {"func": object(), "history_length": 8})(),
+            },
+        )()
+        joint_pos = type("J", (), {"asset_name": "robot", "joint_names": [".*"], "scale": 0.0})()
+        dead_reward = type("T", (), {"func": None})()
+        cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})(),
+                    },
+                )(),
+                "observations": type("O", (), {"policy": policy})(),
+                "actions": type("A", (), {"joint_pos": joint_pos})(),
+                "commands": None,
+                "rewards": type("Rew", (), {"alive": dead_reward})(),
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(policy.history_length, 0)
+        self.assertIsNone(policy.base_lin_vel)
+        self.assertEqual(policy.base_ang_vel.history_length, 0)
+        self.assertEqual(joint_pos.scale, 0.25)
+        self.assertIsNone(cfg.rewards.alive)
+
+        missing_policy = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})(),
+                    },
+                )(),
+                "observations": type("O", (), {"policy": None, "critic": object()})(),
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(missing_policy)
+        self.assertIsNotNone(missing_policy.observations.policy)
+        self.assertEqual(missing_policy.observations.policy.history_length, 0)
+        self.assertIsNotNone(missing_policy.observations.critic)
+
+        rigid = type("P", (), {"kinematic_enabled": True, "disable_gravity": True})()
+        art = type("A", (), {"fix_root_link": True, "enabled_self_collisions": True})()
+        catcher_spawn = type("Sp", (), {"rigid_props": type("P", (), {"kinematic_enabled": True, "disable_gravity": True})()})()
+        robot_spawn = type("Sp", (), {"rigid_props": rigid, "articulation_props": art})()
+        dynamics = type(
+            "BeamDojoStage2EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": type("C", (), {"spawn": catcher_spawn})(),
+                        "robot": type(
+                            "R",
+                            (),
+                            {
+                                "usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd",
+                                "spawn": robot_spawn,
+                            },
+                        )(),
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(dynamics)
+        self.assertFalse(rigid.kinematic_enabled)
+        self.assertFalse(rigid.disable_gravity)
+        self.assertFalse(art.fix_root_link)
+        self.assertFalse(art.enabled_self_collisions)
+        self.assertTrue(catcher_spawn.rigid_props.kinematic_enabled)
+        self.assertTrue(catcher_spawn.rigid_props.disable_gravity)
+
+        missing_sim = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})(),
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "decimation": 4,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(missing_sim)
+        self.assertIsNotNone(missing_sim.sim)
+        self.assertEqual(missing_sim.sim.dt, 0.005)
+        self.assertEqual(missing_sim.sim.device, "cuda:0")
+        self.assertFalse(missing_sim.sim.wait_for_textures)
+        self.assertIsNotNone(missing_sim.rewards)
+        self.assertIsNotNone(missing_sim.events)
+        self.assertIsNotNone(missing_sim.terminations)
+        self.assertIsNotNone(missing_sim.curriculum)
+        self.assertIsNotNone(missing_sim.terminations.time_out)
+
+        lin = type("T", (), {"func": object(), "scale": None})()
+        ang = type("T", (), {"func": object(), "scale": 0.0})()
+        grav = type("T", (), {"func": object(), "scale": 1.0})()
+        scaled = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})(),
+                    },
+                )(),
+                "observations": type(
+                    "O",
+                    (),
+                    {"policy": type("P", (), {"base_lin_vel": lin, "base_ang_vel": ang, "projected_gravity": grav})()},
+                )(),
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(scaled)
+        self.assertEqual(lin.scale, 2.0)
+        self.assertEqual(ang.scale, 0.25)
+        self.assertEqual(grav.scale, 1.0)
+
+        broken_clip = type("T", (), {"func": object(), "clip": (None, None), "scale": 1.0})()
+        fabric = type("Sim", (), {"use_fabric": False, "dt": 0.005, "device": "cuda:0", "render_interval": 4})()
+        clip_cfg = type(
+            "BeamDojoStage2EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})(),
+                    },
+                )(),
+                "observations": type("O", (), {"policy": type("P", (), {"height_scan": broken_clip})()})(),
+                "commands": None,
+                "sim": fabric,
+                "decimation": 4,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(clip_cfg)
+        self.assertIsNone(broken_clip.clip)
+        self.assertTrue(fabric.use_fabric)
+
+        noisy = type("T", (), {"func": object(), "scale": 1.0, "noise": type("N", (), {"std": None})()})()
+        no_scene = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": None,
+                "observations": type("O", (), {"policy": type("P", (), {"base_lin_vel": noisy})()})(),
+                "events": type("E", (), {"reset_base": None, "reset_robot_joints": None})(),
+                "commands": None,
+                "sim": type(
+                    "Sim",
+                    (),
+                    {
+                        "dt": 0.005,
+                        "device": "cuda:0",
+                        "render_interval": 4,
+                        "disable_contact_processing": True,
+                    },
+                )(),
+                "decimation": 4,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(no_scene)
+        self.assertIsNotNone(no_scene.scene)
+        self.assertEqual(no_scene.scene.num_envs, 1024)
+        self.assertIsNotNone(no_scene.scene.robot)
+        self.assertIsNotNone(no_scene.scene.terrain)
+        self.assertIsNotNone(no_scene.events.reset_base)
+        self.assertEqual(no_scene.events.reset_base.mode, "reset")
+        self.assertIsNotNone(no_scene.events.reset_robot_joints)
+        self.assertEqual(no_scene.events.reset_robot_joints.params["position_range"], (1.0, 1.0))
+        self.assertIsNone(noisy.noise)
+        self.assertFalse(no_scene.sim.disable_contact_processing)
+
+    def test_leftover_quad_and_full_usd_helpers(self):
+        anymal = type(
+            "Cfg",
+            (),
+            {"scene": type("S", (), {"robot": type("R", (), {"usd_path": "/Isaac/ANYmal/anymal.usd"})()})()},
+        )()
+        full = type(
+            "Cfg",
+            (),
+            {"scene": type("S", (), {"robot": type("R", (), {"usd_path": "/Isaac/Unitree/H1/h1.usd"})()})()},
+        )()
+        minimal = type(
+            "Cfg",
+            (),
+            {"scene": type("S", (), {"robot": type("R", (), {"usd_path": "/Isaac/Unitree/H1/h1_minimal.usd"})()})()},
+        )()
+        self.assertTrue(self.rt.leftover_quadruped_robot(anymal))
+        self.assertTrue(self.rt.leftover_full_unitree_usd(full))
+        self.assertFalse(self.rt.leftover_full_unitree_usd(minimal))
+        self.assertFalse(self.rt.leftover_quadruped_robot(minimal))
+
+    def test_anymal_parent_body_names(self):
+        self.assertTrue(self.rt.anymal_parent_body_names("base"))
+        self.assertTrue(self.rt.anymal_parent_body_names(".*THIGH"))
+        self.assertTrue(self.rt.anymal_parent_body_names([".*FOOT"]))
+        self.assertFalse(self.rt.anymal_parent_body_names("torso_link"))
+        self.assertFalse(self.rt.anymal_parent_body_names(".*_ankle_link"))
+        self.assertFalse(self.rt.anymal_parent_body_names(None))
+
+    def test_reassert_clears_anymal_base_thigh_foot(self):
+        sensor = type("S", (), {"body_names": ".*FOOT"})()
+        asset = type("A", (), {"body_names": "base"})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "rewards": type(
+                    "Rew",
+                    (),
+                    {
+                        "undesired_contacts": object(),
+                        "feet_air_time": type("T", (), {"params": {"sensor_cfg": sensor}})(),
+                        "feet_slide": type("T", (), {"params": {"sensor_cfg": sensor, "asset_cfg": None}})(),
+                    },
+                )(),
+                "events": type(
+                    "Ev",
+                    (),
+                    {
+                        "base_external_force_torque": type("T", (), {"params": {"asset_cfg": asset}})(),
+                        "add_base_mass": type(
+                            "T", (), {"params": {"asset_cfg": type("A", (), {"body_names": "base"})()}}
+                        )(),
+                        "base_com": None,
+                    },
+                )(),
+                "terminations": type(
+                    "Term",
+                    (),
+                    {
+                        "base_contact": type(
+                            "T",
+                            (),
+                            {"params": {"sensor_cfg": type("S", (), {"body_names": "base"})()}},
+                        )()
+                    },
+                )(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNone(cfg.rewards.undesired_contacts)
+        self.assertEqual(sensor.body_names, ".*_ankle_link")
+        self.assertIsNone(cfg.events.base_external_force_torque)
+        self.assertEqual(cfg.events.add_base_mass.params["asset_cfg"].body_names, "torso_link")
+        self.assertIsNone(cfg.terminations.base_contact)
+
+    def test_none_safe_from_dict_skips_none_target(self):
+        seen = []
+
+        def orig(obj, data, _ns=""):
+            seen.append((obj, data, _ns))
+            return "ok"
+
+        wrapped = self.rt._none_safe_update_class_from_dict(orig)
+        self.assertIsNone(wrapped(None, {"prim_path": "/World/ground"}, _ns="/scene/height_scanner"))
+        self.assertEqual(seen, [])
+        self.assertEqual(wrapped({"a": 1}, {"a": 2}, _ns="/x"), "ok")
+        self.assertEqual(seen, [({"a": 1}, {"a": 2}, "/x")])
+
+
+class GymIdSourceTests(unittest.TestCase):
+    def test_cfg_files_register_expected_ids(self):
+        root = Path(__file__).resolve().parents[1]
+        text = ""
+        for rel in [
+            "h1_cfg/beamdojo_stage1_cfg.py",
+            "h1_cfg/beamdojo_stage2_cfg.py",
+            "g1_cfg/beamdojo_stage1_cfg.py",
+            "g1_cfg/beamdojo_stage2_cfg.py",
+        ]:
+            text += (root / rel).read_text()
+        for gym_id in [
+            "Isaac-BeamDojo-Stage1-H1-v0",
+            "Isaac-BeamDojo-Stage2-H1-v0",
+            "Isaac-BeamDojo-Stage2-H1-Stones-v0",
+            "Isaac-BeamDojo-Stage1-G1-v0",
+            "Isaac-BeamDojo-Stage2-G1-v0",
+            "Isaac-BeamDojo-Stage2-G1-Stones-v0",
+        ]:
+            self.assertIn(gym_id, text)
+        g1s2 = (root / "g1_cfg" / "beamdojo_stage2_cfg.py").read_text()
+        self.assertIn("BeamDojoG1Stage2PPORunnerCfg", g1s2)
+        train = (root / "scripts" / "rsl_rl" / "train_beamdojo.py").read_text()
+        self.assertIn("resolve_load_log_root", train)
+        self.assertIn("resolve_resume_checkpoint", train)
+        self.assertIn("stage2_fine_tunes_stage1", train)
+        self.assertIn("current_learning_iteration = 0", train)
+        self.assertIn("remaining_learning_iterations", train)
+        self.assertIn("Could not dump cfg yaml", train)
+        self.assertIn("reassert_gpu_env_cfg(env_cfg)", train)
+        self.assertLess(train.index("reassert_gpu_env_cfg(env_cfg)"), train.index("gym.make("))
+        self.assertIn("Not a live W&B run yet", train)
+        self.assertIn('"status": "unknown"', train)
+        self.assertNotIn('{**status_body, "status": "running", "iteration": 0}', train)
+        self.assertIn("write_boot_status", train)
+        self.assertIn("clear_stale_distributed_env", train)
+        self.assertLess(train.index("write_boot_status"), train.index("app_launcher = AppLauncher(args_cli)"))
+        self.assertLess(
+            train.index("clear_stale_distributed_env"),
+            train.index("app_launcher = AppLauncher(args_cli)"),
+        )
+        runtime = (root / "scripts" / "rsl_rl" / "beamdojo_runtime.py").read_text()
+        self.assertIn("def _patch_hydra_none_from_dict", runtime)
+        self.assertIn("_patch_hydra_none_from_dict()", runtime)
+        self.assertIn("leftover curriculum.terrain_levels", runtime)
+        self.assertIn("def _ensure_obs_groups", runtime)
+        self.assertIn("def beamdojo_obs_groups_ok", runtime)
+        self.assertIn("def _drop_on_policy_runner_kwarg_collisions", runtime)
+        self.assertIn("def _reassert_g1_joint_fullmatch", runtime)
+        self.assertIn("def _drop_h1_leftover_fingers", runtime)
+        self.assertIn("def _reassert_unitree_robot", runtime)
+        self.assertIn("def _reassert_contact_history", runtime)
+        self.assertIn("def reassert_runner_class", runtime)
+        self.assertIn("def _ensure_train_cfg_sections", runtime)
+        self.assertIn("def _reassert_sim_timing", runtime)
+        self.assertIn("def reassert_agent_cuda", runtime)
+        self.assertIn("def leftover_quadruped_joint_key", runtime)
+        self.assertIn("def leftover_quadruped_actuators", runtime)
+        self.assertIn("def env_cfg_stage", runtime)
+        self.assertIn("def leftover_rigid_catcher", runtime)
+        self.assertIn("def leftover_wrong_robot_joint_key", runtime)
+        self.assertIn("def leftover_wrong_robot_actuator", runtime)
+        self.assertIn("def leftover_asset_base_task_beam", runtime)
+        self.assertIn("def leftover_disabled_replicate_physics", runtime)
+        self.assertIn("def env_cfg_uses_stones", runtime)
+        self.assertIn("def leftover_disabled_collision_asset", runtime)
+        self.assertIn("def leftover_invalid_root_rot", runtime)
+        self.assertIn("def leftover_scene_camera_fields", runtime)
+        self.assertIn("def leftover_unfiltered_collisions", runtime)
+        self.assertIn("def leftover_contact_filter_prims", runtime)
+        self.assertIn("def leftover_wrong_contact_prim", runtime)
+        self.assertIn("def leftover_wrong_action_joint_names", runtime)
+        self.assertIn("def leftover_excess_num_envs", runtime)
+        self.assertIn("def leftover_clone_in_fabric", runtime)
+        self.assertIn("def leftover_missing_robot", runtime)
+        self.assertIn("def leftover_invalid_command_frac", runtime)
+        self.assertIn("def leftover_missing_base_velocity", runtime)
+        self.assertIn("def leftover_missing_joint_pos_action", runtime)
+        self.assertIn("def leftover_missing_class_type", runtime)
+        self.assertIn("def leftover_wait_for_textures", runtime)
+        self.assertIn("def leftover_missing_policy_obs", runtime)
+        self.assertIn("def leftover_empty_policy_obs", runtime)
+        self.assertIn("def leftover_invalid_obs_modifiers", runtime)
+        self.assertIn("def leftover_incomplete_physx", runtime)
+        self.assertIn("def leftover_enabled_action_debug_vis", runtime)
+        self.assertIn("def leftover_invalid_runner_interval", runtime)
+        self.assertIn("def leftover_missing_viewer", runtime)
+        self.assertIn("def leftover_invalid_viewer", runtime)
+        self.assertIn("def leftover_invalid_seed", runtime)
+        self.assertIn("def leftover_invalid_num_rerenders", runtime)
+        self.assertIn("def leftover_invalid_empirical_normalization", runtime)
+        self.assertIn("def leftover_invalid_obs_normalization", runtime)
+        self.assertIn("def leftover_invalid_ppo_float", runtime)
+        self.assertIn("def leftover_invalid_ppo_schedule", runtime)
+        self.assertIn("def _reassert_ppo_hparams", runtime)
+        self.assertIn("def leftover_excess_obs_history", runtime)
+        self.assertIn("def leftover_invalid_action_scale", runtime)
+        self.assertIn("def leftover_missing_term_func", runtime)
+        self.assertIn("def leftover_kinematic_robot", runtime)
+        self.assertIn("def leftover_disabled_gravity_robot", runtime)
+        self.assertIn("def leftover_fixed_root_robot", runtime)
+        self.assertIn("def leftover_self_collisions_robot", runtime)
+        self.assertIn("def leftover_missing_sim", runtime)
+        self.assertIn("def leftover_missing_rewards", runtime)
+        self.assertIn("def leftover_missing_events", runtime)
+        self.assertIn("def leftover_missing_terminations", runtime)
+        self.assertIn("def leftover_missing_time_out", runtime)
+        self.assertIn("def leftover_invalid_obs_scale", runtime)
+        self.assertIn("def leftover_invalid_obs_clip", runtime)
+        self.assertIn("def leftover_disabled_fabric", runtime)
+        self.assertIn("def leftover_missing_scene", runtime)
+        self.assertIn("def leftover_missing_reset_base", runtime)
+        self.assertIn("def leftover_missing_reset_joints", runtime)
+        self.assertIn("def leftover_disabled_contact_processing", runtime)
+        self.assertIn("def leftover_invalid_obs_noise", runtime)
+        self.assertIn("def leftover_invalid_event_mode", runtime)
+        self.assertIn("def leftover_invalid_interval_event", runtime)
+        self.assertIn("def leftover_invalid_min_step_count", runtime)
+        self.assertIn("def leftover_invalid_term_params", runtime)
+        self.assertIn("def leftover_invalid_reward_weight", runtime)
+        self.assertIn("def leftover_invalid_action_clip", runtime)
+        self.assertIn("def leftover_invalid_action_offset", runtime)
+        self.assertIn("def leftover_missing_physx", runtime)
+        self.assertIn("def leftover_invalid_gravity", runtime)
+        self.assertIn("def leftover_invalid_obs_history", runtime)
+        self.assertIn("def leftover_invalid_concatenate_dim", runtime)
+        self.assertIn("def leftover_missing_physics_material", runtime)
+        self.assertIn("def leftover_unusable_device", runtime)
+        self.assertIn("def sanitize_clip_actions", runtime)
+        self.assertIn("reassert_clip_actions(agent_cfg)", train)
+        self.assertIn("ActorCriticRecurrent", runtime)
+        self.assertIn("is_finite_horizon", runtime)
+        self.assertIn("PPODoubleCritic", runtime)
+        self.assertIn("ActorCriticDouble", runtime)
+        env_sh = (root / "scripts" / "cloud" / "_env.sh").read_text()
+        self.assertIn("WANDB_USERNAME", env_sh)
+        self.assertIn("WANDB_ENTITY", env_sh)
+        self.assertIn('WANDB_PROJECT="${WANDB_PROJECT:-beamdojo}"', env_sh)
+        self.assertIn("WANDB_INIT_TIMEOUT", env_sh)
+        play = (root / "scripts" / "rsl_rl" / "play_beamdojo.py").read_text()
+        self.assertIn("pick_play_checkpoint", play)
+        self.assertIn("beamdojo_runtime.runner_cfg_dict(agent_cfg)", play)
+        self.assertIn("reassert_gpu_env_cfg(env_cfg)", play)
+        self.assertLess(play.index("reassert_gpu_env_cfg(env_cfg)"), play.index("gym.make("))
+        self.assertIn("clear_stale_distributed_env", play)
+        self.assertIn("beamdojo_runtime.runner_cfg_dict(agent_cfg)", train)
+        self.assertIn("reassert_runner_class(agent_cfg)", train)
+        self.assertIn("reassert_runner_class(agent_cfg)", play)
+        self.assertIn("reassert_agent_cuda(agent_cfg)", train)
+        self.assertIn("reassert_agent_cuda(agent_cfg)", play)
+        self.assertIn("reassert_clip_actions(agent_cfg)", play)
+        self.assertNotIn("OnPolicyRunner(env, agent_cfg.to_dict()", train)
+        self.assertNotIn("OnPolicyRunner(env, agent_cfg.to_dict()", play)
+        stage1 = (root / "scripts" / "cloud" / "train_stage1.sh").read_text()
+        stage2 = (root / "scripts" / "cloud" / "train_stage2.sh").read_text()
+        self.assertIn("beamdojo_${ROBOT}_stage1", stage2)
+        self.assertNotIn("model_9999.pt", stage2)
+        self.assertNotIn("LOAD_RUN:?", stage2)
+        self.assertIn("--resume", stage2)
+        relaunch = (root / "scripts" / "cloud" / "after_relaunch.sh").read_text()
+        self.assertIn("train_stage2.sh", relaunch)
+        self.assertIn("BEAMDOJO_GIT_REF", relaunch)
+        self.assertIn("return RigidObjectCfg(", relaunch)
+        self.assertIn("sanitize_rsl_rl_train_cfg", relaunch)
+        self.assertIn("_patch_store_code_state", relaunch)
+        self.assertIn("sanitize_ep_infos_for_rsl_log", relaunch)
+        self.assertIn("reassert_gpu_env_cfg", relaunch)
+        self.assertIn("_patch_wandb_init_retry", relaunch)
+        self.assertIn("write_boot_status", relaunch)
+        self.assertIn("clear_stale_distributed_env", relaunch)
+        self.assertIn("anymal_parent_body_names", relaunch)
+        self.assertIn("leftover curriculum.terrain_levels", relaunch)
+        self.assertIn("_ensure_obs_groups", relaunch)
+        self.assertIn("beamdojo_obs_groups_ok", relaunch)
+        self.assertIn("_drop_on_policy_runner_kwarg_collisions", relaunch)
+        self.assertIn("_reassert_g1_joint_fullmatch", relaunch)
+        self.assertIn("_drop_h1_leftover_fingers", relaunch)
+        self.assertIn("_reassert_unitree_robot", relaunch)
+        self.assertIn("_reassert_contact_history", relaunch)
+        self.assertIn("_ensure_train_cfg_sections", relaunch)
+        self.assertIn("_reassert_sim_timing", relaunch)
+        self.assertIn("leftover_quadruped_joint_key", relaunch)
+        self.assertIn("leftover_quadruped_actuators", relaunch)
+        self.assertIn("env_cfg_stage", relaunch)
+        self.assertIn("leftover_rigid_catcher", relaunch)
+        self.assertIn("leftover_wrong_robot_joint_key", relaunch)
+        self.assertIn("leftover_wrong_robot_actuator", relaunch)
+        self.assertIn("leftover_asset_base_task_beam", relaunch)
+        self.assertIn("leftover_disabled_replicate_physics", relaunch)
+        self.assertIn("env_cfg_uses_stones", relaunch)
+        self.assertIn("leftover_disabled_collision_asset", relaunch)
+        self.assertIn("leftover_invalid_root_rot", relaunch)
+        self.assertIn("leftover_scene_camera_fields", relaunch)
+        self.assertIn("leftover_unfiltered_collisions", relaunch)
+        self.assertIn("leftover_contact_filter_prims", relaunch)
+        self.assertIn("leftover_wrong_contact_prim", relaunch)
+        self.assertIn("leftover_wrong_action_joint_names", relaunch)
+        self.assertIn("leftover_excess_num_envs", relaunch)
+        self.assertIn("leftover_clone_in_fabric", relaunch)
+        self.assertIn("leftover_missing_robot", relaunch)
+        self.assertIn("leftover_invalid_command_frac", relaunch)
+        self.assertIn("leftover_missing_base_velocity", relaunch)
+        self.assertIn("leftover_missing_joint_pos_action", relaunch)
+        self.assertIn("leftover_missing_class_type", relaunch)
+        self.assertIn("leftover_wait_for_textures", relaunch)
+        self.assertIn("leftover_missing_policy_obs", relaunch)
+        self.assertIn("leftover_empty_policy_obs", relaunch)
+        self.assertIn("leftover_invalid_obs_modifiers", relaunch)
+        self.assertIn("leftover_incomplete_physx", relaunch)
+        self.assertIn("leftover_enabled_action_debug_vis", relaunch)
+        self.assertIn("leftover_invalid_runner_interval", relaunch)
+        self.assertIn("leftover_missing_viewer", relaunch)
+        self.assertIn("leftover_invalid_seed", relaunch)
+        self.assertIn("leftover_invalid_empirical_normalization", relaunch)
+        self.assertIn("leftover_invalid_ppo_float", relaunch)
+        self.assertIn("leftover_invalid_obs_normalization", relaunch)
+        self.assertIn("leftover_excess_obs_history", relaunch)
+        self.assertIn("leftover_invalid_action_scale", relaunch)
+        self.assertIn("leftover_missing_term_func", relaunch)
+        self.assertIn("leftover_kinematic_robot", relaunch)
+        self.assertIn("leftover_self_collisions_robot", relaunch)
+        self.assertIn("leftover_missing_sim", relaunch)
+        self.assertIn("leftover_missing_rewards", relaunch)
+        self.assertIn("leftover_missing_events", relaunch)
+        self.assertIn("leftover_missing_terminations", relaunch)
+        self.assertIn("leftover_invalid_obs_scale", relaunch)
+        self.assertIn("leftover_invalid_obs_clip", relaunch)
+        self.assertIn("leftover_disabled_fabric", relaunch)
+        self.assertIn("leftover_missing_scene", relaunch)
+        self.assertIn("leftover_missing_reset_base", relaunch)
+        self.assertIn("leftover_disabled_contact_processing", relaunch)
+        self.assertIn("leftover_invalid_event_mode", relaunch)
+        self.assertIn("leftover_invalid_interval_event", relaunch)
+        self.assertIn("leftover_invalid_reward_weight", relaunch)
+        self.assertIn("leftover_invalid_term_params", relaunch)
+        self.assertIn("leftover_missing_physx", relaunch)
+        self.assertIn("leftover_invalid_obs_history", relaunch)
+        self.assertIn("leftover_missing_physics_material", relaunch)
+        self.assertIn("leftover_unusable_device", relaunch)
+        self.assertIn("sanitize_clip_actions", relaunch)
+        self.assertIn("write_boot_status", stage1)
+        self.assertIn("write_boot_status", stage2)
+        self.assertIn('checkout -f -B "$REF" "origin/${REF}"', relaunch)
+        self.assertIn("Never git clean", relaunch)
+        self.assertNotIn("git clean", relaunch.replace("Never git clean", ""))
+        self.assertIn("safe.directory", relaunch)
+        self.assertIn("apply_physx_gpu_capacity", relaunch)
+        self.assertIn("PHYSX_PATCH_COUNT_BEAM", relaunch)
+        self.assertIn("gpu_max_rigid_contact_count", relaunch)
+        self.assertIn("physx_gpu.py", relaunch)
+
+    def test_stage2_catcher_and_ground_disable_are_wired(self):
+        root = Path(__file__).resolve().parents[1]
+        props = (root / "h1_cfg" / "scene_props.py").read_text()
+        common = (root / "h1_cfg" / "beamdojo_common.py").read_text()
+        mdp = (root / "h1_cfg" / "mdp.py").read_text()
+        self.assertIn("def catcher_cfg", props)
+        self.assertIn("CATCHER_Z", props)
+        self.assertIn("collision_group=-1", props)
+        self.assertIn("cfg.scene.catcher = catcher_cfg()", common)
+        self.assertIn("disable_ground_collision", common)
+        self.assertIn("def disable_ground_collision", mdp)
+        self.assertNotIn("No-op helper kept for wrappers", mdp)
+
+    def test_paper_table_ix_dr_is_wired(self):
+        common = (Path(__file__).resolve().parents[1] / "h1_cfg" / "beamdojo_common.py").read_text()
+        self.assertIn("def apply_paper_dr", common)
+        self.assertIn('mass_distribution_params"] = (-2.0, 2.0)', common)
+        self.assertIn("static_friction_range", common)
+        self.assertIn("apply_paper_dr(cfg, spec)", common)
+        self.assertIn("torso = spec.torso_body", common)
+        # Training no longer zeros payload/CoM DR.
+        self.assertNotIn("cfg.events.add_base_mass = None\n    cfg.events.base_com = None\n    cfg.events.push_robot = None", common.split("def apply_play")[0])
+
+    def test_g1_spec_matches_isaaclab_g1_minimal_names(self):
+        from h1_cfg.robot_spec import G1
+
+        self.assertEqual(G1.torso_body, "torso_link")
+        self.assertEqual(G1.torso_joint, "torso_joint")
+        self.assertEqual(G1.feet_body, ".*_ankle_roll_link")
+        self.assertEqual(len(G1.action_joints or []), 6)
+        self.assertIn(".*_hip_pitch_joint", G1.action_joints)
+        self.assertIn(".*_ankle_roll_joint", G1.action_joints)
+
+    def test_stage2_base_contact_uses_robot_torso_body(self):
+        spec = (Path(__file__).resolve().parents[1] / "h1_cfg" / "robot_spec.py").read_text()
+        common = (Path(__file__).resolve().parents[1] / "h1_cfg" / "beamdojo_common.py").read_text()
+        self.assertIn("torso_body", spec)
+        self.assertIn("spec.torso_body", common)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,16 +1,52 @@
-# BeamDojo Balance Beam Implementation for Isaac Lab
+# BeamDojo (Isaac Lab recreation)
 
-Complete training implementation for teaching humanoid robots to walk on narrow balance beams, based on the BeamDojo paper (RSS 2025).
+Isaac Lab / Isaac Sim port of [BeamDojo (RSS 2025)](https://why618188.github.io/beamdojo/) ([arXiv:2502.10363](https://arxiv.org/abs/2502.10363)). Official training code was never released. **Do not claim paper numbers** until a Unitree G1 run actually finishes on GPU.
 
-## 🎯 What This Implements
+**GPU only.** CUDA on an RT-core card (Lambda 1x A10). No Mac/CPU/Metal/fal. No A100/H100 (no RT cores).
 
-This is a faithful recreation of BeamDojo's approach for balance beam locomotion:
+## What is implemented
 
-- ✅ **Curriculum training** (soft → hard dynamics constraints)
-- ✅ **Double critic PPO** (separate critics for locomotion vs foothold rewards)
-- ✅ **Sampling-based foothold rewards** (for polygonal humanoid feet)
-- ✅ **Curriculum learning** (easy → hard beam widths)
-- ✅ **Domain randomization** (physics, observations, terrain)
+- Dual-terrain Stage 1: flat PhysX + imagined beam heightfield (15×15 yaw scan, 15 foot-frame samples, timeout-only)
+- Stage 2: colliding beam or stepping stones, fall / off-terrain terminate, width curriculum
+- Unitree H1 / G1 (`H1_MINIMAL_CFG` / `G1_MINIMAL_CFG`), 12 lower-body G1 actions, double-critic PPO (`w1=1.0`, `w2=0.25`, MLP `[512, 216, 128]`)
+- W&B / TensorBoard logging; checkpoints on Lambda NFS
+
+## Live metrics (webpage)
+
+There is no public Isaac page on Lambda. Use **Weights & Biases** (`--logger wandb`, project `beamdojo`) or TensorBoard over SSH (`ssh -L 6006:localhost:6006 lambda-beamdojo`).
+
+```bash
+# On the A10, inside isaac-lab-base
+bash /workspace/beamdojo/scripts/cloud/train_stage1.sh   # 1024 envs, 10k iters
+# W&B: https://wandb.ai/<your-entity>/beamdojo
+```
+
+Checkpoints stay on `/lambda/nfs/beamdojo/logs/...`. Never git-commit `.pt`.
+
+## Quick start (GPU container)
+
+```bash
+./isaaclab.sh -p /workspace/beamdojo/scripts/rsl_rl/train_beamdojo.py \
+    --stage 1 --robot h1 --num_envs 1024 --max_iterations 10000 \
+    --headless --device cuda:0 --logger wandb --log_project_name beamdojo
+```
+
+Stage 2 (fine-tune Stage 1): `--stage 2 --resume` loads the latest Stage 1 `model_*.pt` under `logs/rsl_rl/beamdojo_<robot>_stage1`. Pin with `--load_run <folder> --checkpoint model_XXXX.pt`. Continue an interrupted Stage 2 job with `--load_experiment beamdojo_h1_stage2` (or `LOAD_EXPERIMENT`).
+
+G1: `--robot g1`
+
+Eval video: `bash /workspace/beamdojo/scripts/cloud/eval_video.sh`
+
+## 🎯 Paper features (this recreation)
+
+Configs exist for these paper pieces. They have **not** been trained to paper numbers on the A10 yet.
+
+- Dual-terrain imagination (Stage 1) then hard collision (Stage 2)
+- Double-critic PPO (locomotion vs foothold, `w2=0.25`)
+- Sampling-based foothold (15 points in the foot frame)
+- Beam-width curriculum (easy → 20 cm)
+- Elevation-map noise on the task height scan (appendix VI-C yaw/tilt, dilate, map-repeat)
+- Table IX payload / CoM / friction / observation noise on existing Isaac Lab event terms
 
 ### Key Differences from Your Original Setup
 

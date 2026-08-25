@@ -1,0 +1,112 @@
+"""Isaac-free contracts for H1/G1 env cfgs used on the A10 path."""
+
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+
+_REPO = Path(__file__).resolve().parents[1]
+
+
+def _read(rel: str) -> str:
+    return (_REPO / rel).read_text()
+
+
+class EnvCfgContractTests(unittest.TestCase):
+    def test_h1_spawns_minimal_usd(self):
+        common = _read("h1_cfg/beamdojo_common.py")
+        self.assertIn("H1_MINIMAL_CFG", common)
+        self.assertIn("G1_MINIMAL_CFG", common)
+
+    def test_beamdojo_env_base_declares_hydra_fields(self):
+        src = _read("h1_cfg/beamdojo_env_base.py")
+        for needle in (
+            "class BeamDojoSceneCfg",
+            "class BeamDojoRewardsCfg",
+            "class BeamDojoEventCfg",
+            "class BeamDojoTerminationsCfg",
+            "class BeamDojoCurriculumCfg",
+            "class BeamDojoEnvCfg",
+            "foothold_penalty",
+            "task_beam",
+            "catcher",
+            "task_stone_0",
+            "task_stone_23",
+            "joint_deviation_fingers",
+            "disable_ground",
+            "off_terrain",
+            "beam_width",
+            "init_beamdojo",
+        ):
+            self.assertIn(needle, src)
+        self.assertIn("task_beam: RigidObjectCfg | None = None", src)
+        self.assertIn("catcher: AssetBaseCfg | None = None", src)
+
+    def test_stage_cfgs_inherit_beamdojo_env(self):
+        for rel in (
+            "h1_cfg/beamdojo_stage1_cfg.py",
+            "h1_cfg/beamdojo_stage2_cfg.py",
+            "g1_cfg/beamdojo_stage1_cfg.py",
+            "g1_cfg/beamdojo_stage2_cfg.py",
+        ):
+            src = _read(rel)
+            self.assertIn("BeamDojoEnvCfg", src)
+            self.assertNotIn("LocomotionVelocityRoughEnvCfg", src)
+
+    def test_g1_gets_official_finger_and_leg_filters(self):
+        common = _read("h1_cfg/beamdojo_common.py")
+        spec = _read("h1_cfg/robot_spec.py")
+        self.assertIn("from h1_cfg.robot_spec import G1_FINGER_JOINTS", common)
+        self.assertIn("G1_FINGER_JOINTS", spec)
+        self.assertIn(".*_five_joint", spec)
+        self.assertIn("joint_deviation_fingers", common)
+        self.assertIn(".*_hip_.*", common)
+        self.assertIn(".*_knee_joint", common)
+        self.assertIn(".*_ankle_.*", common)
+
+    def test_stage2_reset_stays_on_beam(self):
+        common = _read("h1_cfg/beamdojo_common.py")
+        self.assertIn("Spawn on the beam", common)
+        self.assertIn('position_range"] = (1.0, 1.0)', common)
+        self.assertIn("def _zero_root_reset_velocity", common)
+        self.assertIn("heading_command = False", common)
+        self.assertIn("debug_vis = False", common)
+        shared = common.split("def apply_stage1")[0]
+        self.assertIn("heading_command = False", shared)
+        self.assertIn("concatenate_terms = True", shared)
+        self.assertIn("texture_file = None", shared)
+        self.assertIn("cfg.scene.height_scanner = None", common)
+        self.assertIn("cfg.sim.physics_material = cfg.scene.terrain.physics_material", common)
+        self.assertNotIn("RayCasterCfg", common)
+        self.assertIn("def apply_physx_gpu_capacity", common)
+        self.assertIn("h1_cfg/physx_gpu.py", common)
+        self.assertIn("apply_physx_gpu_capacity(cfg, stones=False)", common)
+        self.assertIn("apply_physx_gpu_capacity(cfg, stones=stones)", common)
+        physx = _read("h1_cfg/physx_gpu.py")
+        self.assertIn("PHYSX_PATCH_COUNT_BEAM = 16 * 2**15", physx)
+        self.assertIn("PHYSX_PATCH_COUNT_STONES = 2**20", physx)
+        self.assertNotIn("gpu_max_rigid_contact_count", physx)
+        self.assertNotIn("gpu_total_aggregate_pairs_capacity", physx)
+        self.assertIn("reshape(scan.shape[0], -1)", _read("h1_cfg/mdp.py"))
+
+    def test_stone_count_matches_declared_slots(self):
+        props = _read("h1_cfg/scene_props.py")
+        self.assertIn("STONE_COUNT = 24", props)
+        self.assertIn("count: int = STONE_COUNT", props)
+        self.assertIn("RigidObjectCfg", props)
+        self.assertIn("def _kinematic_cuboid", props)
+        self.assertIn("kinematic_enabled=True", props)
+        self.assertIn("physics_material=_WALK_MATERIAL", props)
+        self.assertIn("collision_group=-1", props)
+        self.assertIn("def catcher_cfg", props)
+        self.assertIn("AssetBaseCfg", props)
+        catcher = props.split("def catcher_cfg", 1)[1]
+        self.assertIn("return AssetBaseCfg(", catcher)
+        self.assertNotIn("return RigidObjectCfg(", catcher)
+        beam = props.split("def task_beam_cfg", 1)[1].split("def stone_cfg", 1)[0]
+        self.assertIn("return RigidObjectCfg(", beam)
+        self.assertNotIn("return AssetBaseCfg(", beam)
+
+
+if __name__ == "__main__":
+    unittest.main()
