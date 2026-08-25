@@ -476,6 +476,63 @@ def reassert_runner_class(agent_cfg) -> None:
         print(f"[WARN] Runner class reassert skipped ({type(exc).__name__}: {exc})")
 
 
+def _ensure_train_cfg_sections(train_cfg: dict) -> None:
+    """``OnPolicyRunner.__init__`` KeyErrors if algorithm/policy dumps are missing."""
+    if not isinstance(train_cfg.get("algorithm"), dict):
+        print("[WARN] Restoring leftover train_cfg.algorithm dict (OnPolicyRunner requires it).")
+        train_cfg["algorithm"] = {}
+    if not isinstance(train_cfg.get("policy"), dict):
+        print("[WARN] Restoring leftover train_cfg.policy dict (OnPolicyRunner requires it).")
+        train_cfg["policy"] = {}
+
+
+KNOWN_ACTIVATIONS = {"elu", "relu", "selu", "tanh", "sigmoid", "lrelu", "leaky_relu"}
+
+
+def _reassert_activation(train_cfg: dict) -> None:
+    policy = train_cfg.get("policy")
+    if not isinstance(policy, dict):
+        return
+    act = policy.get("activation")
+    if act is None:
+        return
+    if str(act).strip().lower() in KNOWN_ACTIVATIONS:
+        return
+    print(f"[WARN] Restoring leftover policy.activation={act!r} to 'elu'.")
+    policy["activation"] = "elu"
+
+
+def _reassert_logger(train_cfg: dict) -> None:
+    """Invalid leftover logger ValueErrors at the start of ``learn()`` — no W&B page."""
+    logger = train_cfg.get("logger")
+    if logger is None:
+        return
+    text = str(logger).strip().lower()
+    if text in {"wandb", "tensorboard", "neptune"}:
+        train_cfg["logger"] = text
+        return
+    fallback = "wandb" if os.environ.get("WANDB_API_KEY", "").strip() else "tensorboard"
+    print(f"[WARN] Restoring leftover logger={logger!r} to {fallback}.")
+    train_cfg["logger"] = fallback
+
+
+def leftover_cpu_device(value) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower().startswith("cpu")
+
+
+def reassert_agent_cuda(agent_cfg) -> None:
+    """Leftover ``agent.device=cpu`` builds ActorCritic on CPU against a CUDA env."""
+    if agent_cfg is None or not leftover_cpu_device(getattr(agent_cfg, "device", None)):
+        return
+    print("[WARN] Forcing leftover agent.device off CPU (OnPolicyRunner is CUDA-only).")
+    try:
+        agent_cfg.device = "cuda:0"
+    except Exception as exc:
+        print(f"[WARN] agent.device reassert skipped ({type(exc).__name__}: {exc})")
+
+
 def sanitize_rsl_rl_train_cfg(train_cfg: dict) -> dict:
     """Drop empty Hydra RND/symmetry dicts before OnPolicyRunner / PPO 3.0.1.
 
@@ -486,6 +543,7 @@ def sanitize_rsl_rl_train_cfg(train_cfg: dict) -> dict:
     """
     if not isinstance(train_cfg, dict):
         return train_cfg
+    _ensure_train_cfg_sections(train_cfg)
     algorithm = train_cfg.get("algorithm")
     if isinstance(algorithm, dict):
         for key in ("rnd_cfg", "symmetry_cfg"):
@@ -497,6 +555,8 @@ def sanitize_rsl_rl_train_cfg(train_cfg: dict) -> dict:
     _drop_on_policy_runner_kwarg_collisions(train_cfg)
     _ensure_runner_intervals(train_cfg)
     _reassert_noise_std_type(train_cfg)
+    _reassert_activation(train_cfg)
+    _reassert_logger(train_cfg)
     return train_cfg
 
 
@@ -831,6 +891,50 @@ def _reassert_contact_history(env_cfg) -> None:
     if hasattr(contact, "track_air_time") and not contact.track_air_time:
         print("[WARN] Enabling leftover contact_forces.track_air_time.")
         contact.track_air_time = True
+
+
+def _reassert_sim_timing(env_cfg) -> None:
+    """Leftover ``dt=0`` / ``decimation=0`` / CPU sim dies at gym.make before W&B."""
+    dec_n = 0
+    if hasattr(env_cfg, "decimation"):
+        try:
+            dec_n = int(env_cfg.decimation)
+        except (TypeError, ValueError):
+            dec_n = 0
+        if dec_n < 1:
+            print("[WARN] Restoring leftover decimation=4.")
+            env_cfg.decimation = 4
+            dec_n = 4
+    if hasattr(env_cfg, "episode_length_s"):
+        try:
+            ep_n = float(env_cfg.episode_length_s)
+        except (TypeError, ValueError):
+            ep_n = 0.0
+        if ep_n <= 0:
+            print("[WARN] Restoring leftover episode_length_s=20.")
+            env_cfg.episode_length_s = 20.0
+    sim = getattr(env_cfg, "sim", None)
+    if sim is None:
+        return
+    if leftover_cpu_device(getattr(sim, "device", None)):
+        print("[WARN] Forcing leftover sim.device off CPU.")
+        sim.device = "cuda:0"
+    if hasattr(sim, "dt"):
+        try:
+            dt = float(sim.dt)
+        except (TypeError, ValueError):
+            dt = 0.0
+        if dt <= 0:
+            print("[WARN] Restoring leftover sim.dt=0.005.")
+            sim.dt = 0.005
+    if hasattr(sim, "render_interval"):
+        try:
+            ri = int(sim.render_interval)
+        except (TypeError, ValueError):
+            ri = 0
+        if ri < 1 and dec_n >= 1:
+            print(f"[WARN] Restoring leftover sim.render_interval={dec_n}.")
+            sim.render_interval = dec_n
 
 
 def _reassert_stage1_timeout_only(env_cfg) -> None:
@@ -1212,6 +1316,7 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     _reassert_stage1_timeout_only(env_cfg)
     _reassert_env_spacing(env_cfg)
     _reassert_contact_history(env_cfg)
+    _reassert_sim_timing(env_cfg)
     _reassert_infinite_horizon(env_cfg)
     _reassert_physx_floors(env_cfg)
 

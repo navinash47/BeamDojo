@@ -783,6 +783,25 @@ class RunnerCfgSanitizeTests(unittest.TestCase):
         self.rt.reassert_runner_class(distill)
         self.assertEqual(distill.class_name, "DistillationRunner")
 
+    def test_missing_algorithm_policy_and_bad_logger_are_restored(self):
+        cfg = {"logger": "mlflow"}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["algorithm"]["class_name"], "PPODoubleCritic")
+        self.assertEqual(cfg["policy"]["class_name"], "ActorCriticDouble")
+        self.assertEqual(cfg["logger"], "tensorboard")
+        cfg["policy"]["activation"] = "swish"
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["policy"]["activation"], "elu")
+
+    def test_leftover_cpu_device_helper(self):
+        self.assertTrue(self.rt.leftover_cpu_device("cpu"))
+        self.assertTrue(self.rt.leftover_cpu_device("CPU:0"))
+        self.assertFalse(self.rt.leftover_cpu_device("cuda:0"))
+        self.assertFalse(self.rt.leftover_cpu_device(None))
+        agent = type("A", (), {"device": "cpu"})()
+        self.rt.reassert_agent_cuda(agent)
+        self.assertEqual(agent.device, "cuda:0")
+
     def test_valid_obs_groups(self):
         self.assertTrue(self.rt.valid_obs_groups({"policy": ["policy"], "critic": ["policy"]}))
         self.assertFalse(self.rt.valid_obs_groups(None))
@@ -1316,6 +1335,27 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertIn("h1_minimal", robot.usd_path.lower())
         self.assertEqual(robot.init_state.pos[2], 1.05)
 
+    def test_leftover_sim_timing_and_cpu_device_are_restored(self):
+        sim = type("Sim", (), {"dt": 0.0, "device": "cpu", "render_interval": 0})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": sim,
+                "decimation": 0,
+                "episode_length_s": 0,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(cfg.decimation, 4)
+        self.assertEqual(cfg.episode_length_s, 20.0)
+        self.assertEqual(sim.dt, 0.005)
+        self.assertEqual(sim.device, "cuda:0")
+        self.assertEqual(sim.render_interval, 4)
+
     def test_leftover_quad_and_full_usd_helpers(self):
         anymal = type(
             "Cfg",
@@ -1463,6 +1503,9 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def _reassert_unitree_robot", runtime)
         self.assertIn("def _reassert_contact_history", runtime)
         self.assertIn("def reassert_runner_class", runtime)
+        self.assertIn("def _ensure_train_cfg_sections", runtime)
+        self.assertIn("def _reassert_sim_timing", runtime)
+        self.assertIn("def reassert_agent_cuda", runtime)
         self.assertIn("ActorCriticRecurrent", runtime)
         self.assertIn("is_finite_horizon", runtime)
         self.assertIn("PPODoubleCritic", runtime)
@@ -1481,6 +1524,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("beamdojo_runtime.runner_cfg_dict(agent_cfg)", train)
         self.assertIn("reassert_runner_class(agent_cfg)", train)
         self.assertIn("reassert_runner_class(agent_cfg)", play)
+        self.assertIn("reassert_agent_cuda(agent_cfg)", train)
+        self.assertIn("reassert_agent_cuda(agent_cfg)", play)
         self.assertNotIn("OnPolicyRunner(env, agent_cfg.to_dict()", train)
         self.assertNotIn("OnPolicyRunner(env, agent_cfg.to_dict()", play)
         stage1 = (root / "scripts" / "cloud" / "train_stage1.sh").read_text()
@@ -1509,6 +1554,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("_drop_h1_leftover_fingers", relaunch)
         self.assertIn("_reassert_unitree_robot", relaunch)
         self.assertIn("_reassert_contact_history", relaunch)
+        self.assertIn("_ensure_train_cfg_sections", relaunch)
+        self.assertIn("_reassert_sim_timing", relaunch)
         self.assertIn("write_boot_status", stage1)
         self.assertIn("write_boot_status", stage2)
         self.assertIn('checkout -f -B "$REF" "origin/${REF}"', relaunch)
