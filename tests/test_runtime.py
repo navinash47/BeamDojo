@@ -1673,6 +1673,14 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertFalse(self.rt.leftover_rigid_catcher(object()))
         self.assertTrue(self.rt.leftover_uncloned_prim_path("/World/Robot"))
         self.assertFalse(self.rt.leftover_uncloned_prim_path("{ENV_REGEX_NS}/Robot"))
+        self.assertTrue(self.rt.leftover_asset_base_task_beam(type("AssetBaseCfg", (), {})()))
+        self.assertFalse(self.rt.leftover_asset_base_task_beam(type("RigidObjectCfg", (), {})()))
+        self.assertTrue(
+            self.rt.leftover_disabled_replicate_physics(type("S", (), {"replicate_physics": False})())
+        )
+        self.assertFalse(
+            self.rt.leftover_disabled_replicate_physics(type("S", (), {"replicate_physics": True})())
+        )
 
     def test_leftover_stage_catcher_and_uncloned_prims(self):
         robot = type("R", (), {"prim_path": "/World/Robot", "usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})()
@@ -1745,6 +1753,58 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.rt.reassert_gpu_env_cfg(missing)
         self.assertIsNotNone(missing.scene.catcher)
         self.assertEqual(missing.scene.catcher.prim_path, "/World/catcher")
+        self.assertIsNotNone(missing.scene.task_beam)
+        self.assertIn("RigidObject", type(missing.scene.task_beam).__name__)
+
+        leftover_beam = type("AssetBaseCfg", (), {"prim_path": "{ENV_REGEX_NS}/TaskBeam"})()
+        scene2 = type(
+            "Scene",
+            (),
+            {
+                "height_scanner": None,
+                "terrain": None,
+                "catcher": None,
+                "task_beam": leftover_beam,
+                "task_stone_0": None,
+                "replicate_physics": False,
+            },
+        )()
+        asset_beam = type(
+            "BeamDojoStage2EnvCfg",
+            (),
+            {
+                "scene": scene2,
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(asset_beam)
+        self.assertIn("RigidObject", type(asset_beam.scene.task_beam).__name__)
+        self.assertTrue(asset_beam.scene.replicate_physics)
+
+        stones = type(
+            "BeamDojoStage2EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "task_beam": leftover_beam,
+                        "task_stone_0": object(),
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(stones)
+        self.assertIsNone(stones.scene.task_beam)
 
     def test_leftover_quad_and_full_usd_helpers(self):
         anymal = type(
@@ -1902,6 +1962,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_rigid_catcher", runtime)
         self.assertIn("def leftover_wrong_robot_joint_key", runtime)
         self.assertIn("def leftover_wrong_robot_actuator", runtime)
+        self.assertIn("def leftover_asset_base_task_beam", runtime)
+        self.assertIn("def leftover_disabled_replicate_physics", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -1962,6 +2024,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_rigid_catcher", relaunch)
         self.assertIn("leftover_wrong_robot_joint_key", relaunch)
         self.assertIn("leftover_wrong_robot_actuator", relaunch)
+        self.assertIn("leftover_asset_base_task_beam", relaunch)
+        self.assertIn("leftover_disabled_replicate_physics", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)

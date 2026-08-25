@@ -494,6 +494,20 @@ def leftover_uncloned_prim_path(path) -> bool:
     return "{ENV_REGEX_NS}" not in text and "{ENV_NS}" not in text
 
 
+def leftover_asset_base_task_beam(beam) -> bool:
+    """AssetBase cuboids are not in rigid-object views; Stage 2 falls through at first reset."""
+    if beam is None:
+        return False
+    return "AssetBase" in type(beam).__name__
+
+
+def leftover_disabled_replicate_physics(scene) -> bool:
+    """``replicate_physics=False`` cannot clone 1024 GPU envs before W&B."""
+    if scene is None or not hasattr(scene, "replicate_physics"):
+        return False
+    return scene.replicate_physics is False
+
+
 def desired_train_robot(env_cfg) -> str | None:
     """``g1`` / ``h1`` from the env class, else USD / leftover fingers."""
     name = type(env_cfg).__name__.lower()
@@ -1552,6 +1566,43 @@ def _world_catcher_stub():
     return type("AssetBaseCfg", (), {"prim_path": "/World/catcher", "collision_group": -1})()
 
 
+def _task_beam_stub():
+    return type("RigidObjectCfg", (), {"prim_path": "{ENV_REGEX_NS}/TaskBeam"})()
+
+
+def _reassert_stage_task_beam(env_cfg) -> None:
+    """Leftover Stage 2 AssetBase beam falls through at wrapper reset — before W&B."""
+    scene = getattr(env_cfg, "scene", None)
+    if scene is None:
+        return
+    beam = getattr(scene, "task_beam", None)
+    if _scene_uses_stones(scene):
+        if beam is not None:
+            print("[WARN] Clearing leftover scene.task_beam (Stage 2 stones has no beam).")
+            scene.task_beam = None
+        return
+    if env_cfg_stage(env_cfg) != 2:
+        return
+    if beam is not None and not leftover_asset_base_task_beam(beam):
+        return
+    print("[WARN] Restoring leftover Stage 2 task_beam to cloned RigidObjectCfg.")
+    try:
+        from h1_cfg.scene_props import task_beam_cfg
+
+        scene.task_beam = task_beam_cfg(collision=True)
+    except ImportError:
+        scene.task_beam = _task_beam_stub()
+
+
+def _reassert_replicate_physics(env_cfg) -> None:
+    """Leftover ``replicate_physics=False`` hangs or OOMs 1024-env GPU clone."""
+    scene = getattr(env_cfg, "scene", None)
+    if not leftover_disabled_replicate_physics(scene):
+        return
+    print("[WARN] Enabling leftover scene.replicate_physics (cloned 1024-env GPU PhysX).")
+    scene.replicate_physics = True
+
+
 def _reassert_stage_catcher(env_cfg) -> None:
     """Leftover Stage 1 catcher / Stage 2 RigidObject catcher dies at first reset."""
     scene = getattr(env_cfg, "scene", None)
@@ -1967,6 +2018,8 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
         curriculum.terrain_levels = None
 
     _reassert_stage_catcher(env_cfg)
+    _reassert_stage_task_beam(env_cfg)
+    _reassert_replicate_physics(env_cfg)
     _reassert_clone_prim_paths(env_cfg)
     _reassert_unitree_robot(env_cfg)
     _drop_leftover_actuators(env_cfg)

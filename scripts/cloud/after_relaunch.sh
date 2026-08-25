@@ -131,6 +131,14 @@ if ! grep -q "def leftover_wrong_robot_actuator" "$REPO/scripts/rsl_rl/beamdojo_
   echo "beamdojo_runtime.py is missing leftover H1/G1 actuator drop. Pull ${REF} or leftover H1 legs ValueError on G1 at gym.make." >&2
   exit 1
 fi
+if ! grep -q "def leftover_asset_base_task_beam" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover AssetBase task_beam restore. Pull ${REF} or Stage 2 falls through the beam at first reset." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_disabled_replicate_physics" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover replicate_physics restore. Pull ${REF} or False hangs 1024-env clone before W&B." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1
