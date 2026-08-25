@@ -502,6 +502,21 @@ def _reassert_activation(train_cfg: dict) -> None:
     policy["activation"] = "elu"
 
 
+def _reassert_init_noise_std(train_cfg: dict) -> None:
+    """ActorCritic 3.0.1 does ``init_noise_std * ones``; leftover None TypeErrors before W&B."""
+    policy = train_cfg.get("policy")
+    if not isinstance(policy, dict):
+        return
+    raw = policy.get("init_noise_std", 1.0)
+    try:
+        std = float(raw)
+    except (TypeError, ValueError):
+        std = 0.0
+    if std != std or std <= 0:
+        print(f"[WARN] Restoring leftover policy.init_noise_std={raw!r} to 1.0.")
+        policy["init_noise_std"] = 1.0
+
+
 def _reassert_logger(train_cfg: dict) -> None:
     """Invalid leftover logger ValueErrors at the start of ``learn()`` — no W&B page."""
     logger = train_cfg.get("logger")
@@ -522,11 +537,74 @@ def leftover_cpu_device(value) -> bool:
     return str(value).strip().lower().startswith("cpu")
 
 
-def reassert_agent_cuda(agent_cfg) -> None:
-    """Leftover ``agent.device=cpu`` builds ActorCritic on CPU against a CUDA env."""
-    if agent_cfg is None or not leftover_cpu_device(getattr(agent_cfg, "device", None)):
+def leftover_unusable_device(value) -> bool:
+    """CPU / MPS / leftover ``cuda:1`` on a single A10 dies at gym.make / runner init."""
+    if leftover_cpu_device(value):
+        return True
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    if text in {"mps", "xpu", "meta"}:
+        return True
+    if not text.startswith("cuda"):
+        return False
+    if text in {"cuda", "cuda:0"}:
+        return False
+    try:
+        world = int(str(os.environ.get("WORLD_SIZE") or "1").strip() or "1")
+    except ValueError:
+        world = 1
+    return world <= 1
+
+
+def leftover_quadruped_joint_key(key) -> bool:
+    """ANYmal/Go2 leftover ``.*HAA`` / ``LF_HFE`` keys miss H1/G1 ``re.fullmatch``."""
+    return bool(
+        re.search(
+            r"(HAA|HFE|KFE|(?:^|[._*])(?:LF|RF|LH|RH|FL|FR|RL|RR)(?:[._*]|$))",
+            str(key),
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def sanitize_clip_actions(value):
+    """Isaac Lab 2.3.2 ``RslRlVecEnvWrapper`` wants ``float | None``.
+
+    Older leftover ``clip_actions=False`` is not None, so the wrapper builds
+    ``Box(0, 0)`` and zeros every action. A leftover string/dict TypeErrors in
+    ``_modify_action_space`` — after gym.make, before ``wandb.init``.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        clip = float(value)
+    except (TypeError, ValueError):
+        return None
+    if clip != clip or clip <= 0:
+        return None
+    return clip
+
+
+def reassert_clip_actions(agent_cfg) -> None:
+    if agent_cfg is None or not hasattr(agent_cfg, "clip_actions"):
         return
-    print("[WARN] Forcing leftover agent.device off CPU (OnPolicyRunner is CUDA-only).")
+    raw = getattr(agent_cfg, "clip_actions", None)
+    cleaned = sanitize_clip_actions(raw)
+    if cleaned == raw:
+        return
+    print(f"[WARN] Restoring leftover clip_actions={raw!r} to {cleaned!r}.")
+    try:
+        agent_cfg.clip_actions = cleaned
+    except Exception as exc:
+        print(f"[WARN] clip_actions reassert skipped ({type(exc).__name__}: {exc})")
+
+
+def reassert_agent_cuda(agent_cfg) -> None:
+    """Leftover ``agent.device=cpu`` / ``cuda:1`` builds ActorCritic off the A10."""
+    if agent_cfg is None or not leftover_unusable_device(getattr(agent_cfg, "device", None)):
+        return
+    print("[WARN] Forcing leftover agent.device onto cuda:0 (single-GPU A10).")
     try:
         agent_cfg.device = "cuda:0"
     except Exception as exc:
@@ -556,7 +634,10 @@ def sanitize_rsl_rl_train_cfg(train_cfg: dict) -> dict:
     _ensure_runner_intervals(train_cfg)
     _reassert_noise_std_type(train_cfg)
     _reassert_activation(train_cfg)
+    _reassert_init_noise_std(train_cfg)
     _reassert_logger(train_cfg)
+    if "clip_actions" in train_cfg:
+        train_cfg["clip_actions"] = sanitize_clip_actions(train_cfg.get("clip_actions"))
     return train_cfg
 
 
@@ -846,6 +927,137 @@ def _reassert_unitree_robot(env_cfg) -> None:
     _set_init_pelvis_z(env_cfg, expected_pelvis_z(env_cfg, spec))
 
 
+def _robot_init_state(env_cfg):
+    robot = getattr(getattr(env_cfg, "scene", None), "robot", None)
+    if robot is None:
+        return None
+    state = getattr(robot, "init_state", None)
+    if state is None and isinstance(robot, dict):
+        state = robot.get("init_state")
+    return state
+
+
+def _joint_map(state, field: str):
+    if state is None:
+        return None
+    value = state.get(field) if isinstance(state, dict) else getattr(state, field, None)
+    return value if isinstance(value, dict) else None
+
+
+def _set_joint_map(state, field: str, value) -> None:
+    if state is None:
+        return
+    if isinstance(state, dict):
+        state[field] = value
+    elif hasattr(state, field):
+        setattr(state, field, value)
+
+
+def _reassert_init_joint_state(env_cfg) -> None:
+    """Hydra leftover ANYmal ``.*HAA`` keys ValueError on H1/G1 at gym.make."""
+    state = _robot_init_state(env_cfg)
+    if state is None:
+        return
+    for field in ("joint_pos", "joint_vel"):
+        mapping = _joint_map(state, field)
+        if not mapping:
+            continue
+        cleaned = {key: mapping[key] for key in mapping if not leftover_quadruped_joint_key(key)}
+        if len(cleaned) == len(mapping):
+            continue
+        dropped = [key for key in mapping if key not in cleaned]
+        print(f"[WARN] Dropping leftover quadruped init_state.{field} keys {dropped}.")
+        _set_joint_map(state, field, cleaned)
+
+
+def _range_pair_ok(value) -> bool:
+    try:
+        lo, hi = value[0], value[1]
+        return float(lo) == float(lo) and float(hi) == float(hi)
+    except (TypeError, ValueError, IndexError, KeyError):
+        return False
+
+
+def _reassert_velocity_ranges(env_cfg) -> None:
+    """Leftover ``ranges.lin_vel_x=None`` TypeErrors UniformVelocityCommand at gym.make."""
+    cmd = getattr(getattr(env_cfg, "commands", None), "base_velocity", None)
+    ranges = getattr(cmd, "ranges", None) if cmd is not None else None
+    if ranges is None:
+        return
+    stage2 = getattr(getattr(env_cfg, "scene", None), "catcher", None) is not None
+    defaults = {
+        "lin_vel_x": (0.2, 0.8) if stage2 else (-1.0, 1.0),
+        "lin_vel_y": (-0.15, 0.15) if stage2 else (-1.0, 1.0),
+        "ang_vel_z": (-0.4, 0.4) if stage2 else (-1.0, 1.0),
+    }
+    for key, default in defaults.items():
+        current = ranges.get(key) if isinstance(ranges, dict) else getattr(ranges, key, None)
+        if _range_pair_ok(current):
+            continue
+        print(f"[WARN] Restoring leftover commands.base_velocity.ranges.{key}={current!r}.")
+        if isinstance(ranges, dict):
+            ranges[key] = default
+        else:
+            setattr(ranges, key, default)
+
+
+def _iter_obs_groups(obs):
+    if obs is None:
+        return
+    names: list[str] = []
+    data = getattr(obs, "__dict__", None) or {}
+    names.extend(key for key in data if not str(key).startswith("_"))
+    for known in ("policy", "critic", "teacher", "privileged", "rnd_state"):
+        if known not in names and hasattr(obs, known):
+            names.append(known)
+    seen: set[str] = set()
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        group = getattr(obs, name, None)
+        if group is None or callable(group):
+            continue
+        yield name, group
+
+
+def _iter_obs_terms(group):
+    if group is None:
+        return
+    if isinstance(group, dict):
+        yield from group.items()
+        return
+    data = getattr(group, "__dict__", None) or {}
+    keys = [key for key in data if not str(key).startswith("_")]
+    if "height_scan" not in keys and hasattr(group, "height_scan"):
+        keys.append("height_scan")
+    for key in keys:
+        yield key, getattr(group, key, None)
+
+
+def _reassert_obs_height_scan(env_cfg) -> None:
+    """Leftover ``mdp.height_scan`` on any group looks up the nulled RayCaster."""
+    obs = getattr(env_cfg, "observations", None)
+    policy = getattr(obs, "policy", None)
+    if policy is not None and hasattr(policy, "concatenate_terms"):
+        policy.concatenate_terms = True
+    if policy is not None and hasattr(policy, "flatten_history_dim"):
+        policy.flatten_history_dim = True
+    for group_name, group in _iter_obs_groups(obs):
+        for term_name, term in _iter_obs_terms(group):
+            if not parent_raycast_height_scan(term):
+                continue
+            if group_name == "policy" and term_name == "height_scan":
+                print("[WARN] Replacing parent mdp.height_scan with task_height_scan.")
+                _install_task_height_scan(group)
+                continue
+            print(f"[WARN] Clearing leftover observations.{group_name}.{term_name} (height_scanner).")
+            if isinstance(group, dict):
+                group[term_name] = None
+            else:
+                setattr(group, term_name, None)
+
+
 def _reassert_pelvis_height(env_cfg, spec_name: str) -> None:
     """ANYmal leftover z≈0.6 buries H1/G1; PhysX explodes at the first reset."""
     try:
@@ -916,8 +1128,8 @@ def _reassert_sim_timing(env_cfg) -> None:
     sim = getattr(env_cfg, "sim", None)
     if sim is None:
         return
-    if leftover_cpu_device(getattr(sim, "device", None)):
-        print("[WARN] Forcing leftover sim.device off CPU.")
+    if leftover_unusable_device(getattr(sim, "device", None)):
+        print("[WARN] Forcing leftover sim.device onto cuda:0 (single-GPU A10).")
         sim.device = "cuda:0"
     if hasattr(sim, "dt"):
         try:
@@ -1274,16 +1486,7 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
         print("[WARN] Clearing Nucleus HDR sky so headless gym.make does not block before W&B.")
         spawn.texture_file = None
 
-    obs = getattr(env_cfg, "observations", None)
-    policy = getattr(obs, "policy", None)
-    if policy is not None and hasattr(policy, "concatenate_terms"):
-        policy.concatenate_terms = True
-    if policy is not None and hasattr(policy, "flatten_history_dim"):
-        # History left unflattened is 3D; ActorCritic 3.0.1 asserts 2D groups.
-        policy.flatten_history_dim = True
-    if policy is not None and parent_raycast_height_scan(getattr(policy, "height_scan", None)):
-        print("[WARN] Replacing parent mdp.height_scan with task_height_scan.")
-        _install_task_height_scan(policy)
+    _reassert_obs_height_scan(env_cfg)
 
     commands = getattr(env_cfg, "commands", None)
     base_velocity = getattr(commands, "base_velocity", None)
@@ -1306,6 +1509,8 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
         curriculum.terrain_levels = None
 
     _reassert_unitree_robot(env_cfg)
+    _reassert_init_joint_state(env_cfg)
+    _reassert_velocity_ranges(env_cfg)
     _reassert_anymal_body_names(env_cfg)
     _reassert_g1_action_joints(env_cfg)
     _reassert_g1_joint_fullmatch(env_cfg)

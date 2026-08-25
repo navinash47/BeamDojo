@@ -792,6 +792,11 @@ class RunnerCfgSanitizeTests(unittest.TestCase):
         cfg["policy"]["activation"] = "swish"
         self.rt.sanitize_rsl_rl_train_cfg(cfg)
         self.assertEqual(cfg["policy"]["activation"], "elu")
+        cfg["policy"]["init_noise_std"] = None
+        cfg["clip_actions"] = False
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["policy"]["init_noise_std"], 1.0)
+        self.assertIsNone(cfg["clip_actions"])
 
     def test_leftover_cpu_device_helper(self):
         self.assertTrue(self.rt.leftover_cpu_device("cpu"))
@@ -801,6 +806,22 @@ class RunnerCfgSanitizeTests(unittest.TestCase):
         agent = type("A", (), {"device": "cpu"})()
         self.rt.reassert_agent_cuda(agent)
         self.assertEqual(agent.device, "cuda:0")
+
+    def test_leftover_unusable_device_and_clip_actions(self):
+        self.assertTrue(self.rt.leftover_unusable_device("cuda:1"))
+        self.assertTrue(self.rt.leftover_unusable_device("mps"))
+        self.assertFalse(self.rt.leftover_unusable_device("cuda:0"))
+        self.assertFalse(self.rt.leftover_unusable_device("cuda"))
+        with mock.patch.dict(os.environ, {"WORLD_SIZE": "2"}, clear=False):
+            self.assertFalse(self.rt.leftover_unusable_device("cuda:1"))
+        agent = type("A", (), {"device": "cuda:1", "clip_actions": True})()
+        self.rt.reassert_agent_cuda(agent)
+        self.rt.reassert_clip_actions(agent)
+        self.assertEqual(agent.device, "cuda:0")
+        self.assertIsNone(agent.clip_actions)
+        self.assertIsNone(self.rt.sanitize_clip_actions("true"))
+        self.assertIsNone(self.rt.sanitize_clip_actions(0))
+        self.assertEqual(self.rt.sanitize_clip_actions(1.0), 1.0)
 
     def test_valid_obs_groups(self):
         self.assertTrue(self.rt.valid_obs_groups({"policy": ["policy"], "critic": ["policy"]}))
@@ -1356,6 +1377,81 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertEqual(sim.device, "cuda:0")
         self.assertEqual(sim.render_interval, 4)
 
+    def test_leftover_cuda1_sim_device_is_restored(self):
+        sim = type("Sim", (), {"dt": 0.005, "device": "cuda:1", "render_interval": 4})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": sim,
+                "decimation": 4,
+                "episode_length_s": 20,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(sim.device, "cuda:0")
+
+    def test_leftover_anymal_init_joints_and_velocity_ranges(self):
+        self.assertTrue(self.rt.leftover_quadruped_joint_key(".*HAA"))
+        self.assertTrue(self.rt.leftover_quadruped_joint_key("LF_HFE"))
+        self.assertTrue(self.rt.leftover_quadruped_joint_key("FL_hip_joint"))
+        self.assertFalse(self.rt.leftover_quadruped_joint_key(".*_hip_yaw"))
+        self.assertFalse(self.rt.leftover_quadruped_joint_key("left_hip_yaw_joint"))
+        state = type(
+            "S",
+            (),
+            {
+                "pos": (0.0, 0.0, 1.05),
+                "joint_pos": {".*HAA": 0.0, ".*_hip_yaw": 0.0},
+                "joint_vel": {"LF_HFE": 0.0, ".*_knee": 0.0},
+            },
+        )()
+        robot = type("R", (), {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd", "init_state": state})()
+        ranges = type("Ranges", (), {"lin_vel_x": None, "lin_vel_y": (-1.0, 1.0), "ang_vel_z": None})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None, "robot": robot})(),
+                "observations": None,
+                "commands": type("Cmd", (), {"base_velocity": type("V", (), {"ranges": ranges})()})(),
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertNotIn(".*HAA", state.joint_pos)
+        self.assertEqual(state.joint_pos[".*_hip_yaw"], 0.0)
+        self.assertNotIn("LF_HFE", state.joint_vel)
+        self.assertEqual(state.joint_vel[".*_knee"], 0.0)
+        self.assertEqual(ranges.lin_vel_x, (-1.0, 1.0))
+        self.assertEqual(ranges.ang_vel_z, (-1.0, 1.0))
+
+    def test_leftover_critic_height_scan_is_cleared(self):
+        leftover = type(
+            "Term",
+            (),
+            {
+                "func": type("F", (), {"__name__": "height_scan"})(),
+                "params": {"sensor_cfg": {"name": "height_scanner"}},
+            },
+        )()
+        critic = type("Group", (), {"height_scan": leftover})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None})(),
+                "observations": type("Obs", (), {"policy": None, "critic": critic})(),
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNone(critic.height_scan)
+
     def test_leftover_quad_and_full_usd_helpers(self):
         anymal = type(
             "Cfg",
@@ -1506,6 +1602,10 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def _ensure_train_cfg_sections", runtime)
         self.assertIn("def _reassert_sim_timing", runtime)
         self.assertIn("def reassert_agent_cuda", runtime)
+        self.assertIn("def leftover_quadruped_joint_key", runtime)
+        self.assertIn("def leftover_unusable_device", runtime)
+        self.assertIn("def sanitize_clip_actions", runtime)
+        self.assertIn("reassert_clip_actions(agent_cfg)", train)
         self.assertIn("ActorCriticRecurrent", runtime)
         self.assertIn("is_finite_horizon", runtime)
         self.assertIn("PPODoubleCritic", runtime)
@@ -1526,6 +1626,7 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("reassert_runner_class(agent_cfg)", play)
         self.assertIn("reassert_agent_cuda(agent_cfg)", train)
         self.assertIn("reassert_agent_cuda(agent_cfg)", play)
+        self.assertIn("reassert_clip_actions(agent_cfg)", play)
         self.assertNotIn("OnPolicyRunner(env, agent_cfg.to_dict()", train)
         self.assertNotIn("OnPolicyRunner(env, agent_cfg.to_dict()", play)
         stage1 = (root / "scripts" / "cloud" / "train_stage1.sh").read_text()
@@ -1556,6 +1657,9 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("_reassert_contact_history", relaunch)
         self.assertIn("_ensure_train_cfg_sections", relaunch)
         self.assertIn("_reassert_sim_timing", relaunch)
+        self.assertIn("leftover_quadruped_joint_key", relaunch)
+        self.assertIn("leftover_unusable_device", relaunch)
+        self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)
         self.assertIn("write_boot_status", stage2)
         self.assertIn('checkout -f -B "$REF" "origin/${REF}"', relaunch)

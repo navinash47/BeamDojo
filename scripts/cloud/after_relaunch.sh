@@ -107,6 +107,18 @@ if ! grep -q "def _reassert_sim_timing" "$REPO/scripts/rsl_rl/beamdojo_runtime.p
   echo "beamdojo_runtime.py is missing sim timing reassert. Pull ${REF} or leftover dt=0 / CPU sim dies at gym.make." >&2
   exit 1
 fi
+if ! grep -q "def leftover_quadruped_joint_key" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover ANYmal joint-key drop. Pull ${REF} or leftover .*HAA dies at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
+  exit 1
+fi
+if ! grep -q "def sanitize_clip_actions" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing clip_actions sanitize. Pull ${REF} or leftover bool/string clip TypeErrors before wandb.init." >&2
+  exit 1
+fi
 if ! grep -q "def apply_physx_gpu_capacity" "$REPO/h1_cfg/beamdojo_common.py"; then
   echo "beamdojo_common.py is missing PhysX GPU buffer bump. Pull ${REF} or cloned beams/stones overflow contact buffers." >&2
   exit 1

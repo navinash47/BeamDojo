@@ -153,6 +153,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     beamdojo_runtime.reassert_gpu_env_cfg(env_cfg)
     beamdojo_runtime.reassert_agent_cuda(agent_cfg)
+    beamdojo_runtime.reassert_clip_actions(agent_cfg)
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
