@@ -128,6 +128,8 @@ def _ppo_init_kwargs(kwargs: dict) -> dict:
             inactive = inactive or (
                 not value.get("use_data_augmentation") and not value.get("use_mirror_loss")
             )
+            # rsl-rl 3.0.1 always reads symmetry_cfg["data_augmentation_func"].
+            inactive = inactive or not value.get("data_augmentation_func")
         if inactive:
             cleaned[key] = None
     return cleaned

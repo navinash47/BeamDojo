@@ -92,6 +92,28 @@ class DoubleCriticModuleTests(unittest.TestCase):
         self.assertIsNone(out["rnd_cfg"])
         self.assertIsNone(out["symmetry_cfg"])
 
+    def test_incomplete_symmetry_cfg_becomes_none(self):
+        import beamdojo_agents.double_critic as dc
+
+        class FakePPO:
+            def __init__(self, policy, symmetry_cfg=None):
+                del policy, symmetry_cfg
+
+        previous = dc.PPO
+        dc.PPO = FakePPO
+        try:
+            out = dc._ppo_init_kwargs(
+                {
+                    "symmetry_cfg": {
+                        "use_data_augmentation": True,
+                        "use_mirror_loss": False,
+                    }
+                }
+            )
+        finally:
+            dc.PPO = previous
+        self.assertIsNone(out["symmetry_cfg"])
+
 
 if __name__ == "__main__":
     unittest.main()
