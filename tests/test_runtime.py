@@ -683,7 +683,23 @@ class RunnerCfgSanitizeTests(unittest.TestCase):
     def test_empty_critic_obs_groups_are_filled_from_policy(self):
         cfg = {"obs_groups": {"policy": ["policy"], "critic": []}}
         self.rt.sanitize_rsl_rl_train_cfg(cfg)
-        self.assertEqual(cfg["obs_groups"]["critic"], ["policy"])
+        self.assertEqual(cfg["obs_groups"], {"policy": ["policy"], "critic": ["policy"]})
+
+    def test_leftover_critic_group_name_is_rewritten(self):
+        cfg = {"obs_groups": {"policy": ["policy"], "critic": ["critic"]}}
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["obs_groups"], {"policy": ["policy"], "critic": ["policy"]})
+
+    def test_leftover_rnd_state_obs_set_is_dropped(self):
+        cfg = {
+            "obs_groups": {
+                "policy": ["policy"],
+                "critic": ["policy"],
+                "rnd_state": ["rnd_state"],
+            }
+        }
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["obs_groups"], {"policy": ["policy"], "critic": ["policy"]})
 
     def test_leftover_actor_critic_class_is_restored(self):
         cfg = {"policy": {"class_name": "ActorCritic"}, "algorithm": {"class_name": "PPO"}}
@@ -696,6 +712,17 @@ class RunnerCfgSanitizeTests(unittest.TestCase):
         self.assertFalse(self.rt.valid_obs_groups(None))
         self.assertFalse(self.rt.valid_obs_groups({}))
         self.assertFalse(self.rt.valid_obs_groups({"policy": []}))
+
+    def test_beamdojo_obs_groups_reject_missing_env_groups(self):
+        self.assertTrue(self.rt.beamdojo_obs_groups_ok({"policy": ["policy"]}))
+        self.assertTrue(self.rt.beamdojo_obs_groups_ok({"policy": ["policy"], "critic": ["policy"]}))
+        self.assertFalse(self.rt.beamdojo_obs_groups_ok({"policy": ["policy"], "critic": ["critic"]}))
+        self.assertFalse(self.rt.beamdojo_obs_groups_ok({"policy": ["policy", "privileged"]}))
+        self.assertFalse(
+            self.rt.beamdojo_obs_groups_ok(
+                {"policy": ["policy"], "critic": ["policy"], "rnd_state": ["rnd_state"]}
+            )
+        )
 
     def test_default_isaaclab_rnd_dump_is_sanitized_to_none(self):
         cfg = {
@@ -966,6 +993,39 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertFalse(self.rt.leftover_all_joints([".*_hip_yaw_joint"]))
         self.assertFalse(self.rt.leftover_all_joints(None))
 
+    def test_reassert_official_reset_and_infinite_horizon(self):
+        reset_params = {
+            "pose_range": {"x": (-0.2, 0.2), "y": (-0.08, 0.08), "yaw": (-0.2, 0.2)},
+            "velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "z": (0.0, 0.0)},
+        }
+        joint_params = {"position_range": (0.5, 1.5)}
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "is_finite_horizon": True,
+                "events": type(
+                    "Ev",
+                    (),
+                    {
+                        "push_robot": object(),
+                        "reset_base": type("T", (), {"params": reset_params})(),
+                        "reset_robot_joints": type("T", (), {"params": joint_params})(),
+                    },
+                )(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNone(cfg.events.push_robot)
+        self.assertEqual(reset_params["velocity_range"]["x"], (0.0, 0.0))
+        self.assertEqual(reset_params["velocity_range"]["y"], (0.0, 0.0))
+        self.assertEqual(joint_params["position_range"], (1.0, 1.0))
+        self.assertFalse(cfg.is_finite_horizon)
+
     def test_h1_full_body_actions_are_not_rewritten(self):
         joint_pos = type("J", (), {"joint_names": [".*"]})()
         cfg = type(
@@ -1102,6 +1162,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("_patch_hydra_none_from_dict()", runtime)
         self.assertIn("leftover curriculum.terrain_levels", runtime)
         self.assertIn("def _ensure_obs_groups", runtime)
+        self.assertIn("def beamdojo_obs_groups_ok", runtime)
+        self.assertIn("is_finite_horizon", runtime)
         self.assertIn("PPODoubleCritic", runtime)
         self.assertIn("ActorCriticDouble", runtime)
         env_sh = (root / "scripts" / "cloud" / "_env.sh").read_text()
@@ -1138,6 +1200,7 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("anymal_parent_body_names", relaunch)
         self.assertIn("leftover curriculum.terrain_levels", relaunch)
         self.assertIn("_ensure_obs_groups", relaunch)
+        self.assertIn("beamdojo_obs_groups_ok", relaunch)
         self.assertIn("write_boot_status", stage1)
         self.assertIn("write_boot_status", stage2)
         self.assertIn('checkout -f -B "$REF" "origin/${REF}"', relaunch)

@@ -224,6 +224,24 @@ def valid_obs_groups(value) -> bool:
     return all(isinstance(name, str) and name for name in policy)
 
 
+def beamdojo_obs_groups_ok(value) -> bool:
+    """Isaac Lab 2.3.2 locomotion exposes only a ``policy`` obs group.
+
+    Official H1 ``H1RoughPPORunnerCfg`` leaves ``obs_groups = MISSING``. A leftover
+    ``critic: ["critic"]`` / ``rnd_state`` / ``privileged`` list passes a shape
+    check, then ``resolve_obs_groups`` ValueErrors in ``OnPolicyRunner.__init__``
+    — before ``learn()`` / ``wandb.init``.
+    """
+    if not valid_obs_groups(value):
+        return False
+    extra = set(value) - {"policy", "critic"}
+    if extra:
+        return False
+    policy = list(value.get("policy") or [])
+    critic = list(value["critic"]) if "critic" in value else policy
+    return policy == ["policy"] and critic == ["policy"]
+
+
 def leftover_all_joints(names) -> bool:
     """True for parent locomotion ``joint_names=[".*"]`` (full-body leftover)."""
     if names is None:
@@ -237,17 +255,19 @@ def _ensure_obs_groups(train_cfg: dict) -> None:
 
     ``OnPolicyRunner.__init__`` calls ``resolve_obs_groups`` *before*
     ``learn()`` / ``wandb.init``. A leftover None / empty / ``MISSING`` dump
-    KeyErrors or ValueErrors and the live W&B page never opens.
+    KeyErrors, and a leftover ``critic: ["critic"]`` ValueErrors, so the live
+    W&B page never opens.
     """
     groups = train_cfg.get("obs_groups")
-    if not valid_obs_groups(groups):
-        print("[WARN] Restoring leftover obs_groups for rsl-rl 3.0.1 (policy+critic → policy).")
-        train_cfg["obs_groups"] = dict(DEFAULT_OBS_GROUPS)
+    if beamdojo_obs_groups_ok(groups):
+        if isinstance(groups, dict) and "critic" not in groups:
+            groups["critic"] = list(groups["policy"])
         return
-    critic = groups.get("critic")
-    if not isinstance(critic, (list, tuple)) or not critic:
-        print("[WARN] Filling leftover empty obs_groups['critic'] from policy.")
-        groups["critic"] = list(groups["policy"])
+    print(
+        "[WARN] Restoring leftover obs_groups for rsl-rl 3.0.1 "
+        "(Isaac 2.3.2 locomotion only has 'policy')."
+    )
+    train_cfg["obs_groups"] = dict(DEFAULT_OBS_GROUPS)
 
 
 def _reassert_double_critic_class_names(train_cfg: dict) -> None:
@@ -453,6 +473,72 @@ def _range_too_wide(span, limit: float) -> bool:
     return abs(lo) > limit or abs(hi) > limit
 
 
+def _params_get(params, key):
+    if params is None:
+        return None
+    if isinstance(params, dict):
+        return params.get(key)
+    return getattr(params, key, None)
+
+
+def _params_set(params, key, value) -> None:
+    if params is None:
+        return
+    if isinstance(params, dict):
+        params[key] = value
+    elif hasattr(params, key):
+        setattr(params, key, value)
+
+
+def _reassert_official_reset_events(env_cfg) -> None:
+    """Official H1/G1 2.3.2: no interval push, identity joints, zero root twist.
+
+    Parent ANYmal leftover ``push_robot`` / ``velocity_range=±0.5`` /
+    ``position_range=(0.5, 1.5)`` runs at ``RslRlVecEnvWrapper`` reset — before
+    ``wandb.init``. Wild joint scale can NaN PhysX; leftover push is eval-only
+    in the paper.
+    """
+    events = getattr(env_cfg, "events", None)
+    if events is None:
+        return
+    if getattr(events, "push_robot", None) is not None:
+        print("[WARN] Clearing leftover events.push_robot (interval push is eval-only).")
+        events.push_robot = None
+
+    reset_base = getattr(events, "reset_base", None)
+    params = getattr(reset_base, "params", None) if reset_base is not None else None
+    vel = _params_get(params, "velocity_range")
+    vel = dict(vel) if isinstance(vel, dict) else {}
+    if any(_range_too_wide(vel.get(key), 0.0) for key in ("x", "y", "z", "roll", "pitch", "yaw")):
+        print("[WARN] Zeroing leftover reset_base velocity (official H1/G1).")
+        for key in ("x", "y", "z", "roll", "pitch", "yaw"):
+            vel[key] = (0.0, 0.0)
+        _params_set(params, "velocity_range", vel)
+
+    reset_joints = getattr(events, "reset_robot_joints", None)
+    jparams = getattr(reset_joints, "params", None) if reset_joints is not None else None
+    span = _params_get(jparams, "position_range")
+    try:
+        lo, hi = float(span[0]), float(span[1])
+    except (TypeError, ValueError, IndexError):
+        lo, hi = 1.0, 1.0
+    if lo < 0.99 or hi > 1.01:
+        print("[WARN] Restoring leftover reset_robot_joints position_range to identity (official H1/G1).")
+        _params_set(jparams, "position_range", (1.0, 1.0))
+
+
+def _reassert_infinite_horizon(env_cfg) -> None:
+    """``RslRlVecEnvWrapper`` only copies ``time_outs`` when horizon is infinite.
+
+    Stage 1 is timeout-only. A leftover ``is_finite_horizon=True`` drops
+    ``extras['time_outs']``, so PPO 3.0.1 / foothold GAE never bootstrap and
+    the 10k is not the paper algorithm (and can NaN value targets).
+    """
+    if getattr(env_cfg, "is_finite_horizon", None) is True:
+        print("[WARN] Forcing is_finite_horizon=False so RslRlVecEnvWrapper sets time_outs.")
+        env_cfg.is_finite_horizon = False
+
+
 def _reassert_stage2_reset_on_beam(env_cfg) -> None:
     """Parent leftover ``y=(-0.5, 0.5)`` / ``yaw=±π`` spawns beside a 20 cm beam."""
     scene = getattr(env_cfg, "scene", None)
@@ -605,7 +691,9 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
 
     _reassert_anymal_body_names(env_cfg)
     _reassert_g1_action_joints(env_cfg)
+    _reassert_official_reset_events(env_cfg)
     _reassert_stage2_reset_on_beam(env_cfg)
+    _reassert_infinite_horizon(env_cfg)
     _reassert_physx_floors(env_cfg)
 
 
