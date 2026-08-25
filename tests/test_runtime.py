@@ -1192,6 +1192,22 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertEqual(joint_pos.offset, 0.0)
         self.assertIsNone(joint_pos.clip)
 
+    def test_reassert_restores_missing_physx_and_gravity(self):
+        sim = type("Sim", (), {"physx": None, "gravity": None, "dt": 0.005, "device": "cuda:0"})()
+        cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": sim,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNotNone(sim.physx)
+        self.assertEqual(sim.gravity, (0.0, 0.0, -9.81))
+
     def test_reassert_restores_nulled_reset_base_params(self):
         cfg = type(
             "BeamDojoStage1EnvCfg",
@@ -1914,6 +1930,10 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         )
         self.assertTrue(self.rt.leftover_disabled_contact_processing(type("Sim", (), {"disable_contact_processing": True})()))
         self.assertFalse(self.rt.leftover_disabled_contact_processing(type("Sim", (), {"disable_contact_processing": False})()))
+        self.assertTrue(self.rt.leftover_missing_physx(type("Sim", (), {"physx": None})()))
+        self.assertFalse(self.rt.leftover_missing_physx(type("Sim", (), {"physx": object()})()))
+        self.assertTrue(self.rt.leftover_invalid_gravity(type("Sim", (), {"gravity": None})()))
+        self.assertFalse(self.rt.leftover_invalid_gravity(type("Sim", (), {"gravity": (0.0, 0.0, -9.81)})()))
         self.assertTrue(self.rt.leftover_invalid_obs_noise(type("N", (), {"n_min": None, "n_max": 0.1})()))
         self.assertFalse(self.rt.leftover_invalid_obs_noise(type("N", (), {"n_min": -0.1, "n_max": 0.1})()))
         self.assertFalse(self.rt.leftover_invalid_obs_noise(None))
@@ -2894,6 +2914,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_invalid_reward_weight", runtime)
         self.assertIn("def leftover_invalid_action_clip", runtime)
         self.assertIn("def leftover_invalid_action_offset", runtime)
+        self.assertIn("def leftover_missing_physx", runtime)
+        self.assertIn("def leftover_invalid_gravity", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -2992,6 +3014,7 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_invalid_interval_event", relaunch)
         self.assertIn("leftover_invalid_reward_weight", relaunch)
         self.assertIn("leftover_invalid_term_params", relaunch)
+        self.assertIn("leftover_missing_physx", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)

@@ -283,6 +283,10 @@ if ! grep -q "def leftover_invalid_term_params" "$REPO/scripts/rsl_rl/beamdojo_r
   echo "beamdojo_runtime.py is missing leftover params=None drop. Pull ${REF} or ManagerBase params.keys() AttributeErrors at gym.make." >&2
   exit 1
 fi
+if ! grep -q "def leftover_missing_physx" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover sim.physx restore. Pull ${REF} or Hydra physx=None dies in SimulationContext at gym.make." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1

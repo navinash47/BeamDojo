@@ -892,6 +892,34 @@ def leftover_disabled_contact_processing(sim) -> bool:
     return getattr(sim, "disable_contact_processing", None) is True
 
 
+def leftover_missing_physx(sim) -> bool:
+    """SimulationContext reads ``sim.physx`` at gym.make. Hydra leftover ``physx=None`` dies."""
+    if sim is None:
+        return False
+    if isinstance(sim, dict):
+        return sim.get("physx") is None
+    return getattr(sim, "physx", None) is None
+
+
+def leftover_invalid_gravity(sim) -> bool:
+    """Leftover ``gravity=None`` / non-triple TypeErrors SimulationContext at gym.make."""
+    if sim is None:
+        return False
+    if isinstance(sim, dict):
+        if "gravity" not in sim:
+            return False
+        gravity = sim.get("gravity")
+    elif not hasattr(sim, "gravity"):
+        return False
+    else:
+        gravity = sim.gravity
+    try:
+        x, y, z = float(gravity[0]), float(gravity[1]), float(gravity[2])
+    except (TypeError, ValueError, IndexError, KeyError):
+        return True
+    return any(value != value for value in (x, y, z))
+
+
 def leftover_missing_scene(env_cfg) -> bool:
     """InteractiveScene dies at gym.make if Hydra nulled ``env_cfg.scene``."""
     return env_cfg is not None and getattr(env_cfg, "scene", None) is None
@@ -2658,6 +2686,32 @@ def _reassert_sim_timing(env_cfg) -> None:
             sim["disable_contact_processing"] = False
         else:
             sim.disable_contact_processing = False
+    if leftover_missing_physx(sim):
+        print("[WARN] Restoring leftover sim.physx (SimulationContext at gym.make).")
+        try:
+            from isaaclab.sim import PhysxCfg
+
+            restored = PhysxCfg()
+        except ImportError:
+            restored = type(
+                "PhysxCfg",
+                (),
+                {
+                    "gpu_max_rigid_contact_count": 2**23,
+                    "gpu_max_rigid_patch_count": 16 * 2**15,
+                    "gpu_found_lost_pairs_capacity": 2**21,
+                },
+            )()
+        if isinstance(sim, dict):
+            sim["physx"] = restored
+        else:
+            sim.physx = restored
+    if leftover_invalid_gravity(sim):
+        print("[WARN] Restoring leftover sim.gravity to (0.0, 0.0, -9.81).")
+        if isinstance(sim, dict):
+            sim["gravity"] = (0.0, 0.0, -9.81)
+        else:
+            sim.gravity = (0.0, 0.0, -9.81)
 
 
 def _world_catcher_stub():
