@@ -769,6 +769,15 @@ def leftover_missing_sim(env_cfg) -> bool:
     return env_cfg is not None and getattr(env_cfg, "sim", None) is None
 
 
+OBS_GROUP_META = {
+    "enable_corruption",
+    "concatenate_terms",
+    "history_length",
+    "flatten_history_dim",
+    "concatenate_dim",
+}
+
+
 def leftover_missing_policy_obs(env_cfg) -> bool:
     """ObservationManager requires ``observations.policy`` at gym.make."""
     obs = getattr(env_cfg, "observations", None)
@@ -777,6 +786,34 @@ def leftover_missing_policy_obs(env_cfg) -> bool:
     if isinstance(obs, dict):
         return obs.get("policy") is None
     return getattr(obs, "policy", None) is None
+
+
+def leftover_live_obs_term(term) -> bool:
+    """A policy term is live only when ``func`` is set. ``func=None`` is dropped before gym.make."""
+    if term is None:
+        return False
+    if isinstance(term, dict):
+        return term.get("func") is not None
+    return getattr(term, "func", None) is not None
+
+
+def leftover_empty_policy_obs(env_cfg) -> bool:
+    """Empty policy concat (all terms None / ``func=None``) dies in ActorCritic before ``wandb.init``.
+
+    A non-None leftover that is not ``func=None`` (including a just-installed
+    ``task_height_scan`` term) is occupancy — do not replace the group.
+    """
+    if leftover_missing_policy_obs(env_cfg):
+        return False
+    obs = getattr(env_cfg, "observations", None)
+    policy = obs.get("policy") if isinstance(obs, dict) else getattr(obs, "policy", None)
+    for name, term in _iter_obs_terms(policy):
+        if name in OBS_GROUP_META:
+            continue
+        if term is None or leftover_missing_term_func(term):
+            continue
+        return False
+    return True
 
 
 def leftover_excess_obs_history(value) -> bool:
@@ -837,6 +874,11 @@ def leftover_invalid_action_clip(value) -> bool:
     return True
 
 
+def leftover_enabled_action_debug_vis(value) -> bool:
+    """ActionTerm.__init__ calls ``set_debug_vis(cfg.debug_vis)``. Headless train must be False."""
+    return value is not False
+
+
 def leftover_missing_term_func(term) -> bool:
     """Manager terms call ``cfg.func`` at gym.make. Hydra leftover ``func=None`` dies."""
     if term is None:
@@ -873,9 +915,9 @@ def leftover_missing_time_out(env_cfg) -> bool:
 
 
 def leftover_invalid_obs_scale(value) -> bool:
-    """``scale=None`` TypeErrors ObservationManager at first reset — before W&B."""
-    if isinstance(value, dict):
-        return False
+    """ObservationManager accepts float/int/tuple. Dict leftover TypeErrors at gym.make."""
+    if isinstance(value, (tuple, list)):
+        return not value or any(leftover_invalid_obs_scale(item) for item in value)
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -888,6 +930,23 @@ def leftover_invalid_obs_clip(value) -> bool:
     if value is None or value is False:
         return False
     return not _range_pair_ok(value)
+
+
+def leftover_invalid_obs_modifiers(modifiers) -> bool:
+    """ObservationManager does ``mod_cfg.params.keys()`` at gym.make. Leftover None params die."""
+    if modifiers is None:
+        return False
+    try:
+        mods = list(modifiers)
+    except TypeError:
+        return True
+    for mod in mods:
+        if mod is None:
+            return True
+        params = mod.get("params") if isinstance(mod, dict) else getattr(mod, "params", None)
+        if params is None or not hasattr(params, "keys"):
+            return True
+    return False
 
 
 def leftover_disabled_fabric(sim) -> bool:
@@ -915,6 +974,67 @@ def leftover_missing_physx(sim) -> bool:
     if isinstance(sim, dict):
         return sim.get("physx") is None
     return getattr(sim, "physx", None) is None
+
+
+# Isaac Lab 2.3.2 SimulationContext._set_additional_physx_params reads these on gym.make.
+PHYSX_CONTEXT_DEFAULTS = {
+    "enable_ccd": False,
+    "enable_stabilization": False,
+    "enable_enhanced_determinism": False,
+    "enable_external_forces_every_iteration": False,
+    "solve_articulation_contact_last": False,
+    "solver_type": 1,
+    "gpu_collision_stack_size": 2**26,
+    "min_position_iteration_count": 1,
+    "max_position_iteration_count": 255,
+    "min_velocity_iteration_count": 0,
+    "max_velocity_iteration_count": 255,
+    "gpu_max_num_partitions": 8,
+}
+
+
+def leftover_invalid_physx_value(name: str, value) -> bool:
+    """None / wrong type for a SimulationContext PhysX field dies at gym.make."""
+    if value is None:
+        return True
+    default = PHYSX_CONTEXT_DEFAULTS[name]
+    if isinstance(default, bool):
+        return not isinstance(value, bool)
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return True
+    if name == "solver_type":
+        return number not in (0, 1)
+    if name == "gpu_max_num_partitions":
+        return number < 1 or number > 32 or (number & (number - 1)) != 0
+    if name == "gpu_collision_stack_size":
+        return number < 1
+    if "iteration_count" in name:
+        return number < 0
+    return False
+
+
+def leftover_invalid_physx_attr(physx, name: str) -> bool:
+    if physx is None:
+        return False
+    if isinstance(physx, dict):
+        if name not in physx:
+            return True
+        value = physx.get(name)
+    elif not hasattr(physx, name):
+        return True
+    else:
+        value = getattr(physx, name)
+    return leftover_invalid_physx_value(name, value)
+
+
+def leftover_incomplete_physx(sim) -> bool:
+    """Hydra can dump PhysxCfg with ``enable_ccd=None``; SimulationContext then TypeErrors."""
+    if leftover_missing_physx(sim):
+        return False
+    physx = sim.get("physx") if isinstance(sim, dict) else getattr(sim, "physx", None)
+    return any(leftover_invalid_physx_attr(physx, name) for name in PHYSX_CONTEXT_DEFAULTS)
 
 
 def leftover_invalid_gravity(sim) -> bool:
@@ -1269,12 +1389,21 @@ def _drop_on_policy_runner_kwarg_collisions(train_cfg: dict) -> None:
                 policy.pop(key, None)
 
 
+def leftover_invalid_runner_interval(value) -> bool:
+    """``OnPolicyRunner`` needs ``num_steps_per_env`` / ``save_interval`` >= 1. Leftover -1 is truthy."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return True
+    return number < 1
+
+
 def _ensure_runner_intervals(train_cfg: dict) -> None:
-    """``OnPolicyRunner.__init__`` KeyErrors if these are leftover-MISSING."""
-    if not train_cfg.get("num_steps_per_env"):
+    """``OnPolicyRunner.__init__`` KeyErrors if these are leftover-MISSING; -1 still dies later."""
+    if leftover_invalid_runner_interval(train_cfg.get("num_steps_per_env")):
         print("[WARN] Restoring leftover num_steps_per_env=24.")
         train_cfg["num_steps_per_env"] = 24
-    if not train_cfg.get("save_interval"):
+    if leftover_invalid_runner_interval(train_cfg.get("save_interval")):
         print("[WARN] Restoring leftover save_interval=100.")
         train_cfg["save_interval"] = 100
 
@@ -2150,7 +2279,11 @@ def _joint_pos_action_stub(env_cfg):
                 ".*_ankle_pitch_joint",
                 ".*_ankle_roll_joint",
             ]
-    return type("JointPositionActionCfg", (), {"asset_name": "robot", "joint_names": names, "scale": 0.25})()
+    return type(
+        "JointPositionActionCfg",
+        (),
+        {"asset_name": "robot", "joint_names": names, "scale": 0.25, "debug_vis": False},
+    )()
 
 
 def _reassert_velocity_command(env_cfg) -> None:
@@ -2246,6 +2379,9 @@ def _reassert_missing_joint_pos_action(env_cfg) -> None:
     ) and leftover_invalid_action_clip(_manager_get(joint_pos, "clip")):
         print("[WARN] Clearing leftover actions.joint_pos.clip (Isaac JointAction only accepts dict).")
         _manager_set(joint_pos, "clip", None)
+    if joint_pos is not None and leftover_enabled_action_debug_vis(_manager_get(joint_pos, "debug_vis")):
+        print("[WARN] Disabling leftover actions.joint_pos.debug_vis (headless train).")
+        _manager_set(joint_pos, "debug_vis", False)
 
 
 def _public_field_names(obj) -> list[str]:
@@ -2305,13 +2441,29 @@ def _reassert_missing_policy_obs(env_cfg) -> None:
         policy = type(
             "ObsGroup",
             (),
-            {"concatenate_terms": True, "flatten_history_dim": True, "history_length": 0},
+            {
+                "concatenate_terms": True,
+                "flatten_history_dim": True,
+                "history_length": 0,
+                "base_lin_vel": type("ObsTerm", (), {"func": object(), "scale": 1.0, "history_length": 0})(),
+            },
         )()
     obs = getattr(env_cfg, "observations", None)
     if obs is None:
         env_cfg.observations = type("Observations", (), {"policy": policy})()
         return
     _manager_set(obs, "policy", policy)
+
+
+def _reassert_empty_policy_obs(env_cfg) -> None:
+    """All ``func=None`` policy terms drop to an empty concat; ActorCritic dies before W&B."""
+    if not leftover_empty_policy_obs(env_cfg):
+        return
+    print("[WARN] Restoring leftover empty observations.policy (no live terms after func=None drop).")
+    obs = getattr(env_cfg, "observations", None)
+    if obs is not None:
+        _manager_set(obs, "policy", None)
+    _reassert_missing_policy_obs(env_cfg)
 
 
 def _restore_manager_cfg(kind: str):
@@ -2534,6 +2686,14 @@ def _reassert_obs_history(env_cfg) -> None:
                     f"[WARN] Restoring leftover observations.{group_name}.{term_name}.history_length to 0."
                 )
                 _manager_set(term, "history_length", 0)
+            if term is not None and (
+                isinstance(term, dict) or hasattr(term, "modifiers")
+            ) and leftover_invalid_obs_modifiers(_manager_get(term, "modifiers")):
+                print(
+                    f"[WARN] Clearing leftover observations.{group_name}.{term_name}.modifiers "
+                    "(params.keys() at gym.make)."
+                )
+                _manager_set(term, "modifiers", None)
 
 
 def _reassert_obs_height_scan(env_cfg) -> None:
@@ -2734,12 +2894,19 @@ def _reassert_sim_timing(env_cfg) -> None:
                     "gpu_max_rigid_contact_count": 2**23,
                     "gpu_max_rigid_patch_count": 16 * 2**15,
                     "gpu_found_lost_pairs_capacity": 2**21,
+                    **PHYSX_CONTEXT_DEFAULTS,
                 },
             )()
         if isinstance(sim, dict):
             sim["physx"] = restored
         else:
             sim.physx = restored
+    physx = sim.get("physx") if isinstance(sim, dict) else getattr(sim, "physx", None)
+    if leftover_incomplete_physx(sim):
+        for name, default in PHYSX_CONTEXT_DEFAULTS.items():
+            if leftover_invalid_physx_attr(physx, name):
+                print(f"[WARN] Restoring leftover sim.physx.{name} to {default!r} (SimulationContext at gym.make).")
+                _manager_set(physx, name, default)
     if leftover_invalid_gravity(sim):
         print("[WARN] Restoring leftover sim.gravity to (0.0, 0.0, -9.81).")
         if isinstance(sim, dict):
@@ -3557,6 +3724,7 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     _reassert_missing_policy_obs(env_cfg)
     _reassert_obs_height_scan(env_cfg)
     _reassert_obs_history(env_cfg)
+    _reassert_empty_policy_obs(env_cfg)
     _reassert_velocity_command(env_cfg)
     _reassert_missing_managers(env_cfg)
 

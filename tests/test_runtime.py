@@ -752,6 +752,11 @@ class RunnerCfgSanitizeTests(unittest.TestCase):
         self.rt.sanitize_rsl_rl_train_cfg(cfg)
         self.assertEqual(cfg["num_steps_per_env"], 24)
         self.assertEqual(cfg["save_interval"], 100)
+        cfg["num_steps_per_env"] = -1
+        cfg["save_interval"] = -5
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["num_steps_per_env"], 24)
+        self.assertEqual(cfg["save_interval"], 100)
 
     def test_incomplete_symmetry_cfg_is_sanitized_to_none(self):
         cfg = {
@@ -1207,6 +1212,71 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.rt.reassert_gpu_env_cfg(cfg)
         self.assertIsNotNone(sim.physx)
         self.assertEqual(sim.gravity, (0.0, 0.0, -9.81))
+        self.assertFalse(sim.physx.enable_ccd)
+        self.assertEqual(sim.physx.gpu_collision_stack_size, 2**26)
+
+    def test_reassert_restores_empty_policy_obs_after_func_none_drop(self):
+        dead = type("T", (), {"func": None, "scale": 1.0})()
+        policy = type(
+            "ObsGroup",
+            (),
+            {"concatenate_terms": True, "history_length": None, "base_lin_vel": dead},
+        )()
+        cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": type("O", (), {"policy": policy})(),
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.assertTrue(self.rt.leftover_empty_policy_obs(cfg))
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertFalse(self.rt.leftover_empty_policy_obs(cfg))
+        self.assertTrue(
+            any(
+                self.rt.leftover_live_obs_term(term)
+                for name, term in self.rt._iter_obs_terms(cfg.observations.policy)
+                if name not in self.rt.OBS_GROUP_META
+            )
+        )
+
+    def test_reassert_obs_modifiers_incomplete_physx_and_action_debug_vis(self):
+        term = type(
+            "T",
+            (),
+            {"func": object(), "scale": 1.0, "modifiers": [type("M", (), {"params": None})()]},
+        )()
+        physx = type(
+            "Physx",
+            (),
+            {"enable_ccd": None, "gpu_collision_stack_size": None, "gpu_max_num_partitions": 3},
+        )()
+        sim = type("Sim", (), {"physx": physx, "dt": 0.005, "device": "cuda:0"})()
+        joint = type("J", (), {"scale": 0.25, "debug_vis": True})()
+        cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": type(
+                    "O",
+                    (),
+                    {"policy": type("P", (), {"concatenate_terms": True, "base_lin_vel": term})()},
+                )(),
+                "actions": type("A", (), {"joint_pos": joint})(),
+                "commands": None,
+                "sim": sim,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsNone(term.modifiers)
+        self.assertFalse(physx.enable_ccd)
+        self.assertEqual(physx.gpu_collision_stack_size, 2**26)
+        self.assertEqual(physx.gpu_max_num_partitions, 8)
+        self.assertFalse(joint.debug_vis)
 
     def test_reassert_obs_history_none_concatenate_dim_and_physics_material(self):
         lin_vel = type("T", (), {"func": object(), "history_length": None, "scale": 2.0})()
@@ -1906,6 +1976,27 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
                 type("C", (), {"observations": type("O", (), {"policy": object()})()})()
             )
         )
+        self.assertTrue(
+            self.rt.leftover_empty_policy_obs(
+                type("C", (), {"observations": type("O", (), {"policy": object()})()})()
+            )
+        )
+        self.assertFalse(
+            self.rt.leftover_empty_policy_obs(
+                type(
+                    "C",
+                    (),
+                    {
+                        "observations": type(
+                            "O",
+                            (),
+                            {"policy": type("P", (), {"base_lin_vel": type("T", (), {"func": object()})()})()},
+                        )()
+                    },
+                )()
+            )
+        )
+        self.assertFalse(self.rt.leftover_empty_policy_obs(type("C", (), {"observations": None})()))
         self.assertTrue(self.rt.leftover_excess_obs_history(24))
         self.assertTrue(self.rt.leftover_excess_obs_history(-1))
         self.assertFalse(self.rt.leftover_excess_obs_history(0))
@@ -1961,7 +2052,20 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertTrue(self.rt.leftover_missing_time_out(type("C", (), {"terminations": None})()))
         self.assertTrue(self.rt.leftover_invalid_obs_scale(None))
         self.assertTrue(self.rt.leftover_invalid_obs_scale(0.0))
+        self.assertTrue(self.rt.leftover_invalid_obs_scale({".*": 1.0}))
         self.assertFalse(self.rt.leftover_invalid_obs_scale(2.0))
+        self.assertFalse(self.rt.leftover_invalid_obs_scale((1.0, 1.0)))
+        self.assertTrue(self.rt.leftover_invalid_obs_modifiers([type("M", (), {"params": None})()]))
+        self.assertTrue(self.rt.leftover_invalid_obs_modifiers("walk"))
+        self.assertFalse(self.rt.leftover_invalid_obs_modifiers(None))
+        self.assertFalse(self.rt.leftover_invalid_obs_modifiers([type("M", (), {"params": {}})()]))
+        self.assertTrue(self.rt.leftover_enabled_action_debug_vis(True))
+        self.assertTrue(self.rt.leftover_enabled_action_debug_vis(None))
+        self.assertFalse(self.rt.leftover_enabled_action_debug_vis(False))
+        self.assertTrue(self.rt.leftover_invalid_runner_interval(-1))
+        self.assertTrue(self.rt.leftover_invalid_runner_interval(0))
+        self.assertTrue(self.rt.leftover_invalid_runner_interval(None))
+        self.assertFalse(self.rt.leftover_invalid_runner_interval(24))
         self.assertTrue(self.rt.leftover_invalid_obs_clip((None, None)))
         self.assertFalse(self.rt.leftover_invalid_obs_clip((-1.0, 1.0)))
         self.assertFalse(self.rt.leftover_invalid_obs_clip(None))
@@ -1978,6 +2082,13 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertFalse(self.rt.leftover_disabled_contact_processing(type("Sim", (), {"disable_contact_processing": False})()))
         self.assertTrue(self.rt.leftover_missing_physx(type("Sim", (), {"physx": None})()))
         self.assertFalse(self.rt.leftover_missing_physx(type("Sim", (), {"physx": object()})()))
+        self.assertTrue(
+            self.rt.leftover_incomplete_physx(type("Sim", (), {"physx": type("P", (), {"enable_ccd": None})()})())
+        )
+        self.assertTrue(self.rt.leftover_incomplete_physx(type("Sim", (), {"physx": object()})()))
+        self.assertFalse(self.rt.leftover_incomplete_physx(type("Sim", (), {"physx": None})()))
+        complete = type("P", (), dict(self.rt.PHYSX_CONTEXT_DEFAULTS))()
+        self.assertFalse(self.rt.leftover_incomplete_physx(type("Sim", (), {"physx": complete})()))
         self.assertTrue(self.rt.leftover_invalid_gravity(type("Sim", (), {"gravity": None})()))
         self.assertFalse(self.rt.leftover_invalid_gravity(type("Sim", (), {"gravity": (0.0, 0.0, -9.81)})()))
         self.assertTrue(self.rt.leftover_invalid_obs_noise(type("N", (), {"n_min": None, "n_max": 0.1})()))
@@ -2933,6 +3044,11 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_missing_class_type", runtime)
         self.assertIn("def leftover_wait_for_textures", runtime)
         self.assertIn("def leftover_missing_policy_obs", runtime)
+        self.assertIn("def leftover_empty_policy_obs", runtime)
+        self.assertIn("def leftover_invalid_obs_modifiers", runtime)
+        self.assertIn("def leftover_incomplete_physx", runtime)
+        self.assertIn("def leftover_enabled_action_debug_vis", runtime)
+        self.assertIn("def leftover_invalid_runner_interval", runtime)
         self.assertIn("def leftover_excess_obs_history", runtime)
         self.assertIn("def leftover_invalid_action_scale", runtime)
         self.assertIn("def leftover_missing_term_func", runtime)
@@ -3044,6 +3160,11 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_missing_class_type", relaunch)
         self.assertIn("leftover_wait_for_textures", relaunch)
         self.assertIn("leftover_missing_policy_obs", relaunch)
+        self.assertIn("leftover_empty_policy_obs", relaunch)
+        self.assertIn("leftover_invalid_obs_modifiers", relaunch)
+        self.assertIn("leftover_incomplete_physx", relaunch)
+        self.assertIn("leftover_enabled_action_debug_vis", relaunch)
+        self.assertIn("leftover_invalid_runner_interval", relaunch)
         self.assertIn("leftover_excess_obs_history", relaunch)
         self.assertIn("leftover_invalid_action_scale", relaunch)
         self.assertIn("leftover_missing_term_func", relaunch)

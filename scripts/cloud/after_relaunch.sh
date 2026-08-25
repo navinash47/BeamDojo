@@ -207,6 +207,26 @@ if ! grep -q "def leftover_missing_policy_obs" "$REPO/scripts/rsl_rl/beamdojo_ru
   echo "beamdojo_runtime.py is missing leftover observations.policy restore. Pull ${REF} or Hydra-nulled policy dies at gym.make." >&2
   exit 1
 fi
+if ! grep -q "def leftover_empty_policy_obs" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover empty-policy restore. Pull ${REF} or func=None drop leaves an empty concat before W&B." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_invalid_obs_modifiers" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover obs-modifier drop. Pull ${REF} or modifiers.params=None AttributeErrors at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_incomplete_physx" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover PhysxCfg fill. Pull ${REF} or enable_ccd=None TypeErrors SimulationContext at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_enabled_action_debug_vis" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover action debug_vis drop. Pull ${REF} or headless set_debug_vis(True) dies at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_invalid_runner_interval" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover num_steps_per_env=-1 restore. Pull ${REF} or OnPolicyRunner dies before wandb.init." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_excess_obs_history" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover obs-history clamp. Pull ${REF} or leftover RNN history_length OOMs 1024 envs at gym.make." >&2
   exit 1
