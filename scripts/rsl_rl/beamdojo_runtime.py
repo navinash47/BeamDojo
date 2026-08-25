@@ -801,6 +801,26 @@ def leftover_invalid_action_scale(value) -> bool:
     return number != number or number <= 0.0
 
 
+def leftover_invalid_action_offset(value) -> bool:
+    """Isaac 2.3.2 JointAction only accepts float/int or dict offset at gym.make."""
+    if isinstance(value, dict):
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return True
+    return number != number
+
+
+def leftover_invalid_action_clip(value) -> bool:
+    """Isaac 2.3.2 JointAction only accepts clip=None or dict. Tuple leftover ValueErrors at gym.make."""
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        return any(not _range_pair_ok(span) for span in value.values())
+    return True
+
+
 def leftover_missing_term_func(term) -> bool:
     """Manager terms call ``cfg.func`` at gym.make. Hydra leftover ``func=None`` dies."""
     if term is None:
@@ -912,6 +932,88 @@ def leftover_invalid_noise_number(value) -> bool:
     except (TypeError, ValueError):
         return True
     return number != number
+
+
+VALID_EVENT_MODES = {"startup", "reset", "interval"}
+
+
+def leftover_event_mode(term):
+    if term is None:
+        return None
+    if isinstance(term, dict):
+        return term.get("mode")
+    return getattr(term, "mode", None)
+
+
+def leftover_invalid_event_mode(term) -> bool:
+    """EventManager indexes ``term.mode`` at gym.make. Leftover None / Isaac 2.4 names KeyError."""
+    if term is None:
+        return False
+    if isinstance(term, dict):
+        if "mode" not in term:
+            return False
+    elif not hasattr(term, "mode"):
+        return False
+    mode = leftover_event_mode(term)
+    if not isinstance(mode, str) or not mode.strip():
+        return True
+    return mode.strip().lower() not in VALID_EVENT_MODES
+
+
+def leftover_invalid_interval_event(term) -> bool:
+    """Leftover ``mode=interval`` with ``interval_range_s=None`` TypeErrors at gym.make."""
+    if str(leftover_event_mode(term) or "").strip().lower() != "interval":
+        return False
+    span = term.get("interval_range_s") if isinstance(term, dict) else getattr(term, "interval_range_s", None)
+    return not _range_pair_ok(span)
+
+
+def leftover_invalid_min_step_count(term) -> bool:
+    """EventManager does ``min_step_count_between_reset < 0`` for reset terms at gym.make."""
+    if term is None:
+        return False
+    if isinstance(term, dict):
+        if "min_step_count_between_reset" not in term:
+            return False
+        value = term.get("min_step_count_between_reset")
+    elif not hasattr(term, "min_step_count_between_reset"):
+        return False
+    else:
+        value = getattr(term, "min_step_count_between_reset")
+    try:
+        return int(value) < 0
+    except (TypeError, ValueError):
+        return True
+
+
+def leftover_invalid_term_params(term) -> bool:
+    """ManagerBase does ``term_cfg.params.keys()`` at gym.make. Leftover ``params=None`` dies."""
+    if term is None:
+        return False
+    if isinstance(term, dict):
+        if "params" not in term:
+            return False
+        return not isinstance(term.get("params"), dict)
+    if not hasattr(term, "params"):
+        return False
+    return not isinstance(getattr(term, "params"), dict)
+
+
+def leftover_invalid_reward_weight(term) -> bool:
+    """RewardManager TypeErrors unless ``weight`` is float/int at gym.make — before W&B."""
+    if term is None:
+        return False
+    if isinstance(term, dict):
+        if "weight" not in term:
+            return False
+        value = term.get("weight")
+    elif not hasattr(term, "weight"):
+        return False
+    else:
+        value = getattr(term, "weight")
+    if isinstance(value, bool) or not isinstance(value, (float, int)):
+        return True
+    return value != value
 
 
 def leftover_invalid_env_spacing(scene) -> bool:
@@ -2077,6 +2179,16 @@ def _reassert_missing_joint_pos_action(env_cfg) -> None:
     ) and leftover_invalid_action_scale(_manager_get(joint_pos, "scale")):
         print("[WARN] Restoring leftover actions.joint_pos.scale to 0.25.")
         _manager_set(joint_pos, "scale", 0.25)
+    if joint_pos is not None and (
+        isinstance(joint_pos, dict) or hasattr(joint_pos, "offset")
+    ) and leftover_invalid_action_offset(_manager_get(joint_pos, "offset")):
+        print("[WARN] Restoring leftover actions.joint_pos.offset to 0.0.")
+        _manager_set(joint_pos, "offset", 0.0)
+    if joint_pos is not None and (
+        isinstance(joint_pos, dict) or hasattr(joint_pos, "clip")
+    ) and leftover_invalid_action_clip(_manager_get(joint_pos, "clip")):
+        print("[WARN] Clearing leftover actions.joint_pos.clip (Isaac JointAction only accepts dict).")
+        _manager_set(joint_pos, "clip", None)
 
 
 def _public_field_names(obj) -> list[str]:
@@ -2934,6 +3046,94 @@ def _reassert_event_joint_names(env_cfg) -> None:
         _set_entity_joint_names(_term_entity_cfg(term, "asset_cfg"), [".*"])
 
 
+def _default_event_mode(name: str) -> str:
+    lower = str(name).lower()
+    if lower.startswith("init") or "startup" in lower:
+        return "startup"
+    return "reset"
+
+
+def _reassert_event_modes(env_cfg) -> None:
+    """Leftover ``mode=None`` / invalid interval / min_step terms die in EventManager at gym.make."""
+    events = getattr(env_cfg, "events", None)
+    if events is None:
+        return
+    for term_name in _public_field_names(events):
+        term = getattr(events, term_name, None)
+        if leftover_invalid_interval_event(term):
+            print(f"[WARN] Clearing leftover events.{term_name} (interval_range_s invalid at gym.make).")
+            setattr(events, term_name, None)
+            continue
+        if leftover_invalid_event_mode(term):
+            mode = _default_event_mode(term_name)
+            print(f"[WARN] Restoring leftover events.{term_name}.mode to {mode}.")
+            _manager_set(term, "mode", mode)
+        if leftover_invalid_min_step_count(term):
+            print(f"[WARN] Restoring leftover events.{term_name}.min_step_count_between_reset to 0.")
+            _manager_set(term, "min_step_count_between_reset", 0)
+
+
+def _reassert_term_params(env_cfg) -> None:
+    """Leftover ``params=None`` AttributeErrors ``params.keys()`` in ManagerBase at gym.make."""
+    for group_name in ("rewards", "events", "terminations", "curriculum"):
+        group = getattr(env_cfg, group_name, None)
+        if group is None:
+            continue
+        for term_name in _public_field_names(group):
+            term = getattr(group, term_name, None)
+            if not leftover_invalid_term_params(term):
+                continue
+            if group_name == "events" and term_name == "reset_base":
+                print("[WARN] Restoring leftover events.reset_base params (first reset before W&B).")
+                _manager_set(group, term_name, _reset_base_term(env_cfg))
+                continue
+            if group_name == "events" and term_name in ("reset_robot_joints", "reset_joints"):
+                print("[WARN] Restoring leftover events.reset_robot_joints params (identity at first reset).")
+                _manager_set(group, term_name, _reset_joints_term())
+                continue
+            print(f"[WARN] Clearing leftover {group_name}.{term_name} (params=None at gym.make).")
+            setattr(group, term_name, None)
+
+
+def _default_reward_weight(name: str, env_cfg) -> float:
+    g1 = _treat_as_g1(env_cfg)
+    weights = {
+        "lin_vel_z_l2": 0.0 if g1 else -2.0,
+        "ang_vel_xy_l2": -0.05,
+        "flat_orientation_l2": -1.0,
+        "dof_torques_l2": -1.5e-7 if g1 else 0.0,
+        "action_rate_l2": -0.005,
+        "dof_acc_l2": -1.25e-7,
+        "base_height_penalty": -10.0,
+        "termination_penalty": -200.0,
+        "track_lin_vel_xy_exp": 1.0,
+        "track_ang_vel_z_exp": 2.0 if g1 else 1.0,
+        "feet_air_time": 0.25,
+        "feet_slide": -0.1 if g1 else -0.25,
+        "dof_pos_limits": -1.0,
+        "joint_deviation_hip": -0.1 if g1 else -0.2,
+        "joint_deviation_arms": -0.1 if g1 else -0.2,
+        "joint_deviation_torso": -0.1,
+        "foothold_penalty": 1.0,
+        "joint_deviation_fingers": -0.05,
+    }
+    return float(weights.get(name, 0.0))
+
+
+def _reassert_reward_weights(env_cfg) -> None:
+    """Leftover ``weight=None`` TypeErrors RewardManager at gym.make — before W&B."""
+    rewards = getattr(env_cfg, "rewards", None)
+    if rewards is None:
+        return
+    for term_name in _public_field_names(rewards):
+        term = getattr(rewards, term_name, None)
+        if not leftover_invalid_reward_weight(term):
+            continue
+        restored = _default_reward_weight(term_name, env_cfg)
+        print(f"[WARN] Restoring leftover rewards.{term_name}.weight to {restored}.")
+        _manager_set(term, "weight", restored)
+
+
 def _restore_entity_names(entity, kind: str, expected, label: str) -> None:
     if entity is None or expected is None:
         return
@@ -3291,6 +3491,9 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     _reassert_g1_joint_fullmatch(env_cfg)
     _drop_h1_leftover_fingers(env_cfg)
     _reassert_h1_joint_fullmatch(env_cfg)
+    _reassert_event_modes(env_cfg)
+    _reassert_term_params(env_cfg)
+    _reassert_reward_weights(env_cfg)
     _reassert_missing_reset_events(env_cfg)
     _reassert_official_reset_events(env_cfg)
     _reassert_event_joint_names(env_cfg)

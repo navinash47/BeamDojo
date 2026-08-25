@@ -1142,6 +1142,80 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertEqual(joint_params["position_range"], (1.0, 1.0))
         self.assertFalse(cfg.is_finite_horizon)
 
+    def test_reassert_event_modes_weights_params_and_action_clip(self):
+        reset_base = type("T", (), {"mode": None, "params": {}, "min_step_count_between_reset": None})()
+        interval_reset = type("T", (), {"mode": "interval", "interval_range_s": None})()
+        track = type("T", (), {"weight": None, "func": object(), "params": {}})()
+        broken_reward = type("T", (), {"weight": 1.0, "func": object(), "params": None})()
+        joint_pos = type(
+            "J",
+            (),
+            {
+                "asset_name": "robot",
+                "joint_names": [".*"],
+                "scale": 0.25,
+                "offset": None,
+                "clip": (None, None),
+            },
+        )()
+        cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "actions": type("Act", (), {"joint_pos": joint_pos})(),
+                "rewards": type(
+                    "Rew",
+                    (),
+                    {"track_lin_vel_xy_exp": track, "feet_air_time": broken_reward},
+                )(),
+                "events": type(
+                    "Ev",
+                    (),
+                    {
+                        "reset_base": reset_base,
+                        "reset_robot_joints": type("T", (), {"mode": "reset", "params": {}})(),
+                        "push_robot": interval_reset,
+                    },
+                )(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(reset_base.mode, "reset")
+        self.assertEqual(reset_base.min_step_count_between_reset, 0)
+        self.assertIsNone(cfg.events.push_robot)
+        self.assertEqual(track.weight, 1.0)
+        self.assertIsNone(cfg.rewards.feet_air_time)
+        self.assertEqual(joint_pos.offset, 0.0)
+        self.assertIsNone(joint_pos.clip)
+
+    def test_reassert_restores_nulled_reset_base_params(self):
+        cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type("Scene", (), {"height_scanner": None, "terrain": None, "catcher": None})(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "events": type(
+                    "Ev",
+                    (),
+                    {
+                        "reset_base": type("T", (), {"mode": "reset", "params": None})(),
+                        "reset_robot_joints": type("T", (), {"mode": "reset", "params": {"position_range": (1.0, 1.0)}})(),
+                    },
+                )(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertIsInstance(cfg.events.reset_base.params, dict)
+        self.assertIn("pose_range", cfg.events.reset_base.params)
+        self.assertEqual(cfg.events.reset_base.mode, "reset")
+
     def test_h1_full_body_actions_are_not_rewritten(self):
         joint_pos = type("J", (), {"joint_names": [".*"]})()
         cfg = type(
@@ -1785,6 +1859,13 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertTrue(self.rt.leftover_invalid_action_scale(0.0))
         self.assertFalse(self.rt.leftover_invalid_action_scale(0.25))
         self.assertFalse(self.rt.leftover_invalid_action_scale({".*": 0.25}))
+        self.assertTrue(self.rt.leftover_invalid_action_offset(None))
+        self.assertFalse(self.rt.leftover_invalid_action_offset(0.0))
+        self.assertFalse(self.rt.leftover_invalid_action_offset({".*": 0.0}))
+        self.assertTrue(self.rt.leftover_invalid_action_clip((None, None)))
+        self.assertTrue(self.rt.leftover_invalid_action_clip((-1.0, 1.0)))
+        self.assertFalse(self.rt.leftover_invalid_action_clip(None))
+        self.assertFalse(self.rt.leftover_invalid_action_clip({".*": (-1.0, 1.0)}))
         self.assertTrue(self.rt.leftover_missing_term_func(type("T", (), {"func": None})()))
         self.assertFalse(self.rt.leftover_missing_term_func(type("T", (), {"func": object()})()))
         self.assertFalse(self.rt.leftover_missing_term_func(object()))
@@ -1836,6 +1917,27 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertTrue(self.rt.leftover_invalid_obs_noise(type("N", (), {"n_min": None, "n_max": 0.1})()))
         self.assertFalse(self.rt.leftover_invalid_obs_noise(type("N", (), {"n_min": -0.1, "n_max": 0.1})()))
         self.assertFalse(self.rt.leftover_invalid_obs_noise(None))
+        self.assertTrue(self.rt.leftover_invalid_event_mode(type("T", (), {"mode": None})()))
+        self.assertTrue(self.rt.leftover_invalid_event_mode(type("T", (), {"mode": "prestartup"})()))
+        self.assertFalse(self.rt.leftover_invalid_event_mode(type("T", (), {"mode": "reset"})()))
+        self.assertFalse(self.rt.leftover_invalid_event_mode(object()))
+        self.assertTrue(
+            self.rt.leftover_invalid_interval_event(type("T", (), {"mode": "interval", "interval_range_s": None})())
+        )
+        self.assertFalse(
+            self.rt.leftover_invalid_interval_event(type("T", (), {"mode": "interval", "interval_range_s": (2.0, 4.0)})())
+        )
+        self.assertTrue(self.rt.leftover_invalid_min_step_count(type("T", (), {"min_step_count_between_reset": None})()))
+        self.assertTrue(self.rt.leftover_invalid_min_step_count(type("T", (), {"min_step_count_between_reset": -1})()))
+        self.assertFalse(self.rt.leftover_invalid_min_step_count(type("T", (), {"min_step_count_between_reset": 0})()))
+        self.assertFalse(self.rt.leftover_invalid_min_step_count(object()))
+        self.assertTrue(self.rt.leftover_invalid_term_params(type("T", (), {"params": None})()))
+        self.assertFalse(self.rt.leftover_invalid_term_params(type("T", (), {"params": {}})()))
+        self.assertFalse(self.rt.leftover_invalid_term_params(object()))
+        self.assertTrue(self.rt.leftover_invalid_reward_weight(type("T", (), {"weight": None})()))
+        self.assertFalse(self.rt.leftover_invalid_reward_weight(type("T", (), {"weight": 1.0})()))
+        self.assertFalse(self.rt.leftover_invalid_reward_weight(type("T", (), {"weight": 0})()))
+        self.assertFalse(self.rt.leftover_invalid_reward_weight(object()))
         h1_act = type(
             "BeamDojoStage1EnvCfg",
             (),
@@ -2785,6 +2887,13 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_missing_reset_joints", runtime)
         self.assertIn("def leftover_disabled_contact_processing", runtime)
         self.assertIn("def leftover_invalid_obs_noise", runtime)
+        self.assertIn("def leftover_invalid_event_mode", runtime)
+        self.assertIn("def leftover_invalid_interval_event", runtime)
+        self.assertIn("def leftover_invalid_min_step_count", runtime)
+        self.assertIn("def leftover_invalid_term_params", runtime)
+        self.assertIn("def leftover_invalid_reward_weight", runtime)
+        self.assertIn("def leftover_invalid_action_clip", runtime)
+        self.assertIn("def leftover_invalid_action_offset", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -2879,6 +2988,10 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_missing_scene", relaunch)
         self.assertIn("leftover_missing_reset_base", relaunch)
         self.assertIn("leftover_disabled_contact_processing", relaunch)
+        self.assertIn("leftover_invalid_event_mode", relaunch)
+        self.assertIn("leftover_invalid_interval_event", relaunch)
+        self.assertIn("leftover_invalid_reward_weight", relaunch)
+        self.assertIn("leftover_invalid_term_params", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)

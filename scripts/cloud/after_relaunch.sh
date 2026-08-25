@@ -267,6 +267,22 @@ if ! grep -q "def leftover_disabled_contact_processing" "$REPO/scripts/rsl_rl/be
   echo "beamdojo_runtime.py is missing leftover contact-processing restore. Pull ${REF} or ContactSensor is empty at first reset." >&2
   exit 1
 fi
+if ! grep -q "def leftover_invalid_event_mode" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover event-mode restore. Pull ${REF} or mode=None KeyErrors EventManager at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_invalid_interval_event" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover interval-event drop. Pull ${REF} or interval_range_s=None TypeErrors at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_invalid_reward_weight" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover reward-weight restore. Pull ${REF} or weight=None TypeErrors RewardManager at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_invalid_term_params" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover params=None drop. Pull ${REF} or ManagerBase params.keys() AttributeErrors at gym.make." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1
