@@ -790,6 +790,22 @@ def leftover_excess_obs_history(value) -> bool:
     return number != number or number < 0 or number > 0
 
 
+def leftover_invalid_obs_history(value) -> bool:
+    """Term ``history_length=None`` TypeErrors ``history_length > 0`` in ObservationManager at gym.make."""
+    if value is None:
+        return True
+    return leftover_excess_obs_history(value)
+
+
+def leftover_invalid_concatenate_dim(value) -> bool:
+    """ObservationManager does ``concatenate_dim >= 0`` at gym.make. Leftover None TypeErrors."""
+    try:
+        int(value)
+    except (TypeError, ValueError):
+        return True
+    return False
+
+
 def leftover_invalid_action_scale(value) -> bool:
     """``scale=None`` TypeErrors JointPositionAction at gym.make. Dict maps stay."""
     if isinstance(value, dict):
@@ -918,6 +934,19 @@ def leftover_invalid_gravity(sim) -> bool:
     except (TypeError, ValueError, IndexError, KeyError):
         return True
     return any(value != value for value in (x, y, z))
+
+
+def leftover_missing_physics_material(sim) -> bool:
+    """SimulationContext calls ``physics_material.func`` at gym.make. Leftover None dies."""
+    if sim is None:
+        return False
+    if isinstance(sim, dict):
+        if "physics_material" not in sim:
+            return False
+        return sim.get("physics_material") is None
+    if not hasattr(sim, "physics_material"):
+        return False
+    return getattr(sim, "physics_material") is None
 
 
 def leftover_missing_scene(env_cfg) -> bool:
@@ -2465,6 +2494,11 @@ def _reassert_obs_history(env_cfg) -> None:
                 f"{_manager_get(group, 'history_length')!r} to 0."
             )
             _manager_set(group, "history_length", 0)
+        if (isinstance(group, dict) or hasattr(group, "concatenate_dim")) and leftover_invalid_concatenate_dim(
+            _manager_get(group, "concatenate_dim")
+        ):
+            print(f"[WARN] Restoring leftover observations.{group_name}.concatenate_dim to -1.")
+            _manager_set(group, "concatenate_dim", -1)
         for term_name, term in _iter_obs_terms(group):
             if leftover_missing_term_func(term):
                 print(f"[WARN] Clearing leftover observations.{group_name}.{term_name} (func=None).")
@@ -2495,7 +2529,7 @@ def _reassert_obs_history(env_cfg) -> None:
                 _manager_set(term, "noise", None)
             if term is not None and (
                 isinstance(term, dict) or hasattr(term, "history_length")
-            ) and leftover_excess_obs_history(_manager_get(term, "history_length")):
+            ) and leftover_invalid_obs_history(_manager_get(term, "history_length")):
                 print(
                     f"[WARN] Restoring leftover observations.{group_name}.{term_name}.history_length to 0."
                 )
@@ -2712,6 +2746,21 @@ def _reassert_sim_timing(env_cfg) -> None:
             sim["gravity"] = (0.0, 0.0, -9.81)
         else:
             sim.gravity = (0.0, 0.0, -9.81)
+    if leftover_missing_physics_material(sim):
+        terrain = getattr(getattr(env_cfg, "scene", None), "terrain", None)
+        mat = getattr(terrain, "physics_material", None) if terrain is not None else None
+        if mat is None:
+            try:
+                from isaaclab.sim.spawners.materials import RigidBodyMaterialCfg
+
+                mat = RigidBodyMaterialCfg()
+            except ImportError:
+                mat = type("RigidBodyMaterialCfg", (), {"func": lambda *args, **kwargs: None})()
+        print("[WARN] Restoring leftover sim.physics_material (SimulationContext at gym.make).")
+        if isinstance(sim, dict):
+            sim["physics_material"] = mat
+        else:
+            sim.physics_material = mat
 
 
 def _world_catcher_stub():

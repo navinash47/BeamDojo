@@ -287,6 +287,14 @@ if ! grep -q "def leftover_missing_physx" "$REPO/scripts/rsl_rl/beamdojo_runtime
   echo "beamdojo_runtime.py is missing leftover sim.physx restore. Pull ${REF} or Hydra physx=None dies in SimulationContext at gym.make." >&2
   exit 1
 fi
+if ! grep -q "def leftover_invalid_obs_history" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover obs history_length=None restore. Pull ${REF} or ObservationManager TypeErrors at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_missing_physics_material" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover physics_material restore. Pull ${REF} or SimulationContext calls None.func at gym.make." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1

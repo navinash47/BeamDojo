@@ -1208,6 +1208,44 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertIsNotNone(sim.physx)
         self.assertEqual(sim.gravity, (0.0, 0.0, -9.81))
 
+    def test_reassert_obs_history_none_concatenate_dim_and_physics_material(self):
+        lin_vel = type("T", (), {"func": object(), "history_length": None, "scale": 2.0})()
+        policy = type(
+            "ObsGroup",
+            (),
+            {
+                "concatenate_terms": True,
+                "concatenate_dim": None,
+                "history_length": None,
+                "base_lin_vel": lin_vel,
+            },
+        )()
+        sim = type("Sim", (), {"physics_material": None, "dt": 0.005, "device": "cuda:0"})()
+        walk = object()
+        cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": type("Terr", (), {"physics_material": walk})(),
+                        "catcher": None,
+                    },
+                )(),
+                "observations": type("O", (), {"policy": policy})(),
+                "commands": None,
+                "sim": sim,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cfg)
+        self.assertEqual(lin_vel.history_length, 0)
+        self.assertIsNone(policy.history_length)
+        self.assertEqual(policy.concatenate_dim, -1)
+        self.assertIs(sim.physics_material, walk)
+
     def test_reassert_restores_nulled_reset_base_params(self):
         cfg = type(
             "BeamDojoStage1EnvCfg",
@@ -1871,6 +1909,14 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertTrue(self.rt.leftover_excess_obs_history(24))
         self.assertTrue(self.rt.leftover_excess_obs_history(-1))
         self.assertFalse(self.rt.leftover_excess_obs_history(0))
+        self.assertFalse(self.rt.leftover_excess_obs_history(None))
+        self.assertTrue(self.rt.leftover_invalid_obs_history(None))
+        self.assertTrue(self.rt.leftover_invalid_obs_history(24))
+        self.assertFalse(self.rt.leftover_invalid_obs_history(0))
+        self.assertTrue(self.rt.leftover_invalid_concatenate_dim(None))
+        self.assertFalse(self.rt.leftover_invalid_concatenate_dim(-1))
+        self.assertTrue(self.rt.leftover_missing_physics_material(type("Sim", (), {"physics_material": None})()))
+        self.assertFalse(self.rt.leftover_missing_physics_material(type("Sim", (), {"physics_material": object()})()))
         self.assertTrue(self.rt.leftover_invalid_action_scale(None))
         self.assertTrue(self.rt.leftover_invalid_action_scale(0.0))
         self.assertFalse(self.rt.leftover_invalid_action_scale(0.25))
@@ -2916,6 +2962,9 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_invalid_action_offset", runtime)
         self.assertIn("def leftover_missing_physx", runtime)
         self.assertIn("def leftover_invalid_gravity", runtime)
+        self.assertIn("def leftover_invalid_obs_history", runtime)
+        self.assertIn("def leftover_invalid_concatenate_dim", runtime)
+        self.assertIn("def leftover_missing_physics_material", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -3015,6 +3064,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_invalid_reward_weight", relaunch)
         self.assertIn("leftover_invalid_term_params", relaunch)
         self.assertIn("leftover_missing_physx", relaunch)
+        self.assertIn("leftover_invalid_obs_history", relaunch)
+        self.assertIn("leftover_missing_physics_material", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)
