@@ -863,6 +863,57 @@ def leftover_disabled_fabric(sim) -> bool:
     return getattr(sim, "use_fabric", None) is False
 
 
+def leftover_disabled_contact_processing(sim) -> bool:
+    """Leftover True empties ContactSensor at first reset (feet_air_time / Stage 2 fall)."""
+    if sim is None:
+        return False
+    if isinstance(sim, dict):
+        return sim.get("disable_contact_processing") is True
+    return getattr(sim, "disable_contact_processing", None) is True
+
+
+def leftover_missing_scene(env_cfg) -> bool:
+    """InteractiveScene dies at gym.make if Hydra nulled ``env_cfg.scene``."""
+    return env_cfg is not None and getattr(env_cfg, "scene", None) is None
+
+
+def leftover_missing_reset_base(env_cfg) -> bool:
+    """No ``reset_base`` leaves the H1 in the plane; PhysX NaNs at first reset."""
+    events = getattr(env_cfg, "events", None) if env_cfg is not None else None
+    if events is None:
+        return True
+    if isinstance(events, dict):
+        return events.get("reset_base") is None
+    return getattr(events, "reset_base", None) is None
+
+
+def leftover_missing_reset_joints(env_cfg) -> bool:
+    events = getattr(env_cfg, "events", None) if env_cfg is not None else None
+    if events is None:
+        return True
+    if isinstance(events, dict):
+        return events.get("reset_robot_joints") is None
+    return getattr(events, "reset_robot_joints", None) is None
+
+
+def leftover_invalid_obs_noise(noise) -> bool:
+    """Leftover ``noise.n_min=None`` / ``std=None`` TypeErrors at first reset."""
+    if noise is None:
+        return False
+    keys = ("n_min", "n_max", "std", "mean")
+    if isinstance(noise, dict):
+        return any(k in noise and leftover_invalid_noise_number(noise.get(k)) for k in keys)
+    return any(hasattr(noise, k) and leftover_invalid_noise_number(getattr(noise, k)) for k in keys)
+
+
+def leftover_invalid_noise_number(value) -> bool:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return True
+    return number != number
+
+
 def leftover_invalid_env_spacing(scene) -> bool:
     """``None`` / parent ``2.5`` overlaps 1024 H1s at gym.make. Play ``6.0`` stays."""
     if scene is None or not hasattr(scene, "env_spacing"):
@@ -2172,6 +2223,96 @@ def _reassert_missing_time_out(env_cfg) -> None:
         )
 
 
+def _scene_stub():
+    return type(
+        "Scene",
+        (),
+        {
+            "num_envs": 1024,
+            "env_spacing": 8.0,
+            "replicate_physics": True,
+            "filter_collisions": True,
+            "clone_in_fabric": False,
+            "robot": None,
+            "terrain": None,
+            "contact_forces": None,
+            "height_scanner": None,
+            "catcher": None,
+        },
+    )()
+
+
+def _reassert_missing_scene(env_cfg) -> None:
+    if not leftover_missing_scene(env_cfg):
+        return
+    print("[WARN] Restoring leftover scene (InteractiveScene at gym.make).")
+    try:
+        from h1_cfg.beamdojo_env_base import BeamDojoSceneCfg
+
+        env_cfg.scene = BeamDojoSceneCfg(num_envs=1024, env_spacing=8.0)
+    except ImportError:
+        env_cfg.scene = _scene_stub()
+
+
+def _reset_base_term(env_cfg):
+    stage2 = env_cfg_stage(env_cfg) == 2
+    pose = (
+        {"x": (-0.2, 0.5), "y": (-0.08, 0.08), "yaw": (-0.3, 0.3)}
+        if stage2
+        else {"x": (-0.2, 0.2), "y": (-0.08, 0.08), "yaw": (-0.2, 0.2)}
+    )
+    vel = {key: (0.0, 0.0) for key in ("x", "y", "z", "roll", "pitch", "yaw")}
+    params = {"pose_range": pose, "velocity_range": vel}
+    try:
+        import isaaclab.envs.mdp as mdp
+        from isaaclab.managers import EventTermCfg as EventTerm
+
+        return EventTerm(func=mdp.reset_root_state_uniform, mode="reset", params=params)
+    except ImportError:
+        return type(
+            "EventTerm",
+            (),
+            {
+                "func": type("F", (), {"__name__": "reset_root_state_uniform"})(),
+                "mode": "reset",
+                "params": params,
+            },
+        )()
+
+
+def _reset_joints_term():
+    params = {"position_range": (1.0, 1.0), "velocity_range": (0.0, 0.0)}
+    try:
+        import isaaclab.envs.mdp as mdp
+        from isaaclab.managers import EventTermCfg as EventTerm
+
+        return EventTerm(func=mdp.reset_joints_by_scale, mode="reset", params=params)
+    except ImportError:
+        return type(
+            "EventTerm",
+            (),
+            {
+                "func": type("F", (), {"__name__": "reset_joints_by_scale"})(),
+                "mode": "reset",
+                "params": params,
+            },
+        )()
+
+
+def _reassert_missing_reset_events(env_cfg) -> None:
+    """Leftover nulled reset_base / reset_robot_joints NaN PhysX at first reset."""
+    if leftover_missing_events(env_cfg):
+        print("[WARN] Restoring leftover events (EventManager at gym.make).")
+        env_cfg.events = _restore_manager_cfg("events")
+    events = getattr(env_cfg, "events", None)
+    if leftover_missing_reset_base(env_cfg):
+        print("[WARN] Restoring leftover events.reset_base (first reset before W&B).")
+        _manager_set(events, "reset_base", _reset_base_term(env_cfg))
+    if leftover_missing_reset_joints(env_cfg):
+        print("[WARN] Restoring leftover events.reset_robot_joints (identity at first reset).")
+        _manager_set(events, "reset_robot_joints", _reset_joints_term())
+
+
 def _reassert_obs_history(env_cfg) -> None:
     """Leftover RNN ``history_length`` OOMs 1024 envs; leftover ``func=None`` dies at gym.make."""
     obs = getattr(env_cfg, "observations", None)
@@ -2207,6 +2348,11 @@ def _reassert_obs_history(env_cfg) -> None:
             ) and leftover_invalid_obs_clip(_manager_get(term, "clip")):
                 print(f"[WARN] Clearing leftover observations.{group_name}.{term_name}.clip.")
                 _manager_set(term, "clip", None)
+            if term is not None and (
+                isinstance(term, dict) or hasattr(term, "noise")
+            ) and leftover_invalid_obs_noise(_manager_get(term, "noise")):
+                print(f"[WARN] Clearing leftover observations.{group_name}.{term_name}.noise.")
+                _manager_set(term, "noise", None)
             if term is not None and (
                 isinstance(term, dict) or hasattr(term, "history_length")
             ) and leftover_excess_obs_history(_manager_get(term, "history_length")):
@@ -2394,6 +2540,12 @@ def _reassert_sim_timing(env_cfg) -> None:
             sim["use_fabric"] = True
         else:
             sim.use_fabric = True
+    if leftover_disabled_contact_processing(sim):
+        print("[WARN] Enabling leftover sim contact processing (ContactSensor at first reset).")
+        if isinstance(sim, dict):
+            sim["disable_contact_processing"] = False
+        else:
+            sim.disable_contact_processing = False
 
 
 def _world_catcher_stub():
@@ -3063,6 +3215,7 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     instance. A leftover ANYmal RayCaster plus ``mdp.height_scan`` looks up
     ``scene['height_scanner']`` on the first observation.
     """
+    _reassert_missing_scene(env_cfg)
     scene = getattr(env_cfg, "scene", None)
     if scene is not None and getattr(scene, "height_scanner", None) is not None:
         print(
@@ -3077,6 +3230,7 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     _reassert_clone_in_fabric(env_cfg)
     _reassert_stage_in_memory(env_cfg)
     _reassert_missing_scene_assets(env_cfg)
+    scene = getattr(env_cfg, "scene", None)
 
     terrain = getattr(scene, "terrain", None) if scene is not None else None
     if terrain is not None:
@@ -3137,6 +3291,7 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     _reassert_g1_joint_fullmatch(env_cfg)
     _drop_h1_leftover_fingers(env_cfg)
     _reassert_h1_joint_fullmatch(env_cfg)
+    _reassert_missing_reset_events(env_cfg)
     _reassert_official_reset_events(env_cfg)
     _reassert_event_joint_names(env_cfg)
     _reassert_stage2_reset_on_beam(env_cfg)

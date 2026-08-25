@@ -255,6 +255,18 @@ if ! grep -q "def leftover_disabled_fabric" "$REPO/scripts/rsl_rl/beamdojo_runti
   echo "beamdojo_runtime.py is missing leftover use_fabric restore. Pull ${REF} or Fabric-off hides Stage 2 USD writes." >&2
   exit 1
 fi
+if ! grep -q "def leftover_missing_scene" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover scene restore. Pull ${REF} or Hydra env_cfg.scene=None dies at gym.make." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_missing_reset_base" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover reset_base restore. Pull ${REF} or missing reset_base NaNs PhysX at first reset." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_disabled_contact_processing" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover contact-processing restore. Pull ${REF} or ContactSensor is empty at first reset." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1

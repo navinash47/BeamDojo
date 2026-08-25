@@ -1824,6 +1824,18 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertFalse(self.rt.leftover_invalid_obs_clip(None))
         self.assertTrue(self.rt.leftover_disabled_fabric(type("Sim", (), {"use_fabric": False})()))
         self.assertFalse(self.rt.leftover_disabled_fabric(type("Sim", (), {"use_fabric": True})()))
+        self.assertTrue(self.rt.leftover_missing_scene(type("C", (), {"scene": None})()))
+        self.assertTrue(self.rt.leftover_missing_reset_base(type("C", (), {"events": None})()))
+        self.assertTrue(
+            self.rt.leftover_missing_reset_joints(
+                type("C", (), {"events": type("E", (), {"reset_base": object()})()})()
+            )
+        )
+        self.assertTrue(self.rt.leftover_disabled_contact_processing(type("Sim", (), {"disable_contact_processing": True})()))
+        self.assertFalse(self.rt.leftover_disabled_contact_processing(type("Sim", (), {"disable_contact_processing": False})()))
+        self.assertTrue(self.rt.leftover_invalid_obs_noise(type("N", (), {"n_min": None, "n_max": 0.1})()))
+        self.assertFalse(self.rt.leftover_invalid_obs_noise(type("N", (), {"n_min": -0.1, "n_max": 0.1})()))
+        self.assertFalse(self.rt.leftover_invalid_obs_noise(None))
         h1_act = type(
             "BeamDojoStage1EnvCfg",
             (),
@@ -2544,6 +2556,40 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertIsNone(broken_clip.clip)
         self.assertTrue(fabric.use_fabric)
 
+        noisy = type("T", (), {"func": object(), "scale": 1.0, "noise": type("N", (), {"std": None})()})()
+        no_scene = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": None,
+                "observations": type("O", (), {"policy": type("P", (), {"base_lin_vel": noisy})()})(),
+                "events": type("E", (), {"reset_base": None, "reset_robot_joints": None})(),
+                "commands": None,
+                "sim": type(
+                    "Sim",
+                    (),
+                    {
+                        "dt": 0.005,
+                        "device": "cuda:0",
+                        "render_interval": 4,
+                        "disable_contact_processing": True,
+                    },
+                )(),
+                "decimation": 4,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(no_scene)
+        self.assertIsNotNone(no_scene.scene)
+        self.assertEqual(no_scene.scene.num_envs, 1024)
+        self.assertIsNotNone(no_scene.scene.robot)
+        self.assertIsNotNone(no_scene.scene.terrain)
+        self.assertIsNotNone(no_scene.events.reset_base)
+        self.assertEqual(no_scene.events.reset_base.mode, "reset")
+        self.assertIsNotNone(no_scene.events.reset_robot_joints)
+        self.assertEqual(no_scene.events.reset_robot_joints.params["position_range"], (1.0, 1.0))
+        self.assertIsNone(noisy.noise)
+        self.assertFalse(no_scene.sim.disable_contact_processing)
+
     def test_leftover_quad_and_full_usd_helpers(self):
         anymal = type(
             "Cfg",
@@ -2734,6 +2780,11 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_invalid_obs_scale", runtime)
         self.assertIn("def leftover_invalid_obs_clip", runtime)
         self.assertIn("def leftover_disabled_fabric", runtime)
+        self.assertIn("def leftover_missing_scene", runtime)
+        self.assertIn("def leftover_missing_reset_base", runtime)
+        self.assertIn("def leftover_missing_reset_joints", runtime)
+        self.assertIn("def leftover_disabled_contact_processing", runtime)
+        self.assertIn("def leftover_invalid_obs_noise", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -2825,6 +2876,9 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_invalid_obs_scale", relaunch)
         self.assertIn("leftover_invalid_obs_clip", relaunch)
         self.assertIn("leftover_disabled_fabric", relaunch)
+        self.assertIn("leftover_missing_scene", relaunch)
+        self.assertIn("leftover_missing_reset_base", relaunch)
+        self.assertIn("leftover_disabled_contact_processing", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)
