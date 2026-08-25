@@ -1707,6 +1707,22 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertFalse(self.rt.leftover_invalid_root_rot((1.0, 0.0, 0.0, 0.0)))
         self.assertTrue(self.rt.leftover_nucleus_path("omniverse://nucleus/Materials/foo.mdl"))
         self.assertFalse(self.rt.leftover_nucleus_path("/Isaac/Robots/Unitree/H1/h1_minimal.usd"))
+        cam_scene = type("S", (), {"tiled_camera": object(), "filter_collisions": False, "num_envs": 0})()
+        self.assertEqual(self.rt.leftover_scene_camera_fields(cam_scene), ["tiled_camera"])
+        self.assertTrue(self.rt.leftover_unfiltered_collisions(cam_scene))
+        self.assertTrue(self.rt.leftover_zero_num_envs(cam_scene))
+        self.assertTrue(
+            self.rt.leftover_missing_scene_entity_term(
+                type("T", (), {"params": {"sensor_cfg": {"name": "height_scanner"}}})(),
+                {"robot", "contact_forces", "terrain"},
+            )
+        )
+        self.assertFalse(
+            self.rt.leftover_missing_scene_entity_term(
+                type("T", (), {"params": {"asset_cfg": {"name": "robot"}}})(),
+                {"robot", "contact_forces", "terrain"},
+            )
+        )
 
     def test_leftover_stage_catcher_and_uncloned_prims(self):
         robot = type("R", (), {"prim_path": "/World/Robot", "usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd"})()
@@ -1922,6 +1938,44 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertEqual(rot_state.rot, (1.0, 0.0, 0.0, 0.0))
         self.assertIsNone(spawn.visual_material)
 
+        props = type("P", (), {"collision_enabled": False})()
+        robot_spawn = type("Sp", (), {"collision_props": props, "activate_contact_sensors": True})()
+        cam_robot = type(
+            "R",
+            (),
+            {"usd_path": "/Isaac/Robots/Unitree/H1/h1_minimal.usd", "spawn": robot_spawn},
+        )()
+        scan_event = type("T", (), {"params": {"sensor_cfg": {"name": "height_scanner"}}})()
+        cam_cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "robot": cam_robot,
+                        "tiled_camera": object(),
+                        "filter_collisions": False,
+                        "num_envs": 0,
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+                "events": type("Ev", (), {"randomize_scanner": scan_event})(),
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(cam_cfg)
+        self.assertIsNone(cam_cfg.scene.tiled_camera)
+        self.assertTrue(cam_cfg.scene.filter_collisions)
+        self.assertEqual(cam_cfg.scene.num_envs, 1024)
+        self.assertTrue(props.collision_enabled)
+        self.assertIsNone(cam_cfg.events.randomize_scanner)
+
     def test_leftover_quad_and_full_usd_helpers(self):
         anymal = type(
             "Cfg",
@@ -2083,6 +2137,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def env_cfg_uses_stones", runtime)
         self.assertIn("def leftover_disabled_collision_asset", runtime)
         self.assertIn("def leftover_invalid_root_rot", runtime)
+        self.assertIn("def leftover_scene_camera_fields", runtime)
+        self.assertIn("def leftover_unfiltered_collisions", runtime)
         self.assertIn("def leftover_unusable_device", runtime)
         self.assertIn("def sanitize_clip_actions", runtime)
         self.assertIn("reassert_clip_actions(agent_cfg)", train)
@@ -2148,6 +2204,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("env_cfg_uses_stones", relaunch)
         self.assertIn("leftover_disabled_collision_asset", relaunch)
         self.assertIn("leftover_invalid_root_rot", relaunch)
+        self.assertIn("leftover_scene_camera_fields", relaunch)
+        self.assertIn("leftover_unfiltered_collisions", relaunch)
         self.assertIn("leftover_unusable_device", relaunch)
         self.assertIn("sanitize_clip_actions", relaunch)
         self.assertIn("write_boot_status", stage1)

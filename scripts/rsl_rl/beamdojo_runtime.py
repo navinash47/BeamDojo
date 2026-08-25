@@ -576,6 +576,70 @@ def leftover_disabled_replicate_physics(scene) -> bool:
     return scene.replicate_physics is False
 
 
+SCENE_CAMERA_FIELDS = (
+    "tiled_camera",
+    "camera",
+    "front_camera",
+    "left_camera",
+    "right_camera",
+    "overhead_camera",
+)
+
+
+def leftover_scene_camera_fields(scene) -> list[str]:
+    """PLAY leftover cameras × 1024 envs OOM the A10 at gym.make — before W&B."""
+    if scene is None:
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for key in (*SCENE_CAMERA_FIELDS, *_public_field_names(scene)):
+        if key in seen or "camera" not in str(key).lower():
+            continue
+        seen.add(key)
+        if getattr(scene, key, None) is not None:
+            names.append(key)
+    return names
+
+
+def leftover_unfiltered_collisions(scene) -> bool:
+    """``filter_collisions=False`` lets 1024 clones hit each other at first reset."""
+    if scene is None or not hasattr(scene, "filter_collisions"):
+        return False
+    return scene.filter_collisions is False
+
+
+def leftover_zero_num_envs(scene) -> bool:
+    if scene is None or not hasattr(scene, "num_envs"):
+        return False
+    try:
+        return int(scene.num_envs) < 1
+    except (TypeError, ValueError):
+        return True
+
+
+def leftover_missing_scene_entity_term(term, present: set[str]) -> bool:
+    """True when a manager term still looks up a scene entity Hydra leftover never spawned."""
+    if term is None:
+        return False
+    params = getattr(term, "params", None)
+    if params is None:
+        return False
+    for key in ("sensor_cfg", "asset_cfg"):
+        entity = params.get(key) if isinstance(params, dict) else getattr(params, key, None)
+        name = _cfg_entity_name(entity)
+        if name and name not in present:
+            return True
+    return False
+
+
+def _cfg_entity_name(entity) -> str:
+    if entity is None:
+        return ""
+    if isinstance(entity, dict):
+        return str(entity.get("name") or "")
+    return str(getattr(entity, "name", "") or "")
+
+
 def desired_train_robot(env_cfg) -> str | None:
     """``g1`` / ``h1`` from the env class, else USD / leftover fingers."""
     name = type(env_cfg).__name__.lower()
@@ -1410,9 +1474,8 @@ def _scene_entity_names(env_cfg) -> set[str]:
     scene = getattr(env_cfg, "scene", None)
     if scene is None:
         return names
-    data = getattr(scene, "__dict__", None) or {}
-    for key, value in data.items():
-        if value is not None and not str(key).startswith("_"):
+    for key in _public_field_names(scene):
+        if getattr(scene, key, None) is not None:
             names.add(str(key))
     for known in ("task_beam", "catcher", "sky_light"):
         if getattr(scene, known, None) is not None:
@@ -1751,6 +1814,69 @@ def _reassert_replicate_physics(env_cfg) -> None:
         return
     print("[WARN] Enabling leftover scene.replicate_physics (cloned 1024-env GPU PhysX).")
     scene.replicate_physics = True
+
+
+def _reassert_drop_scene_cameras(env_cfg) -> None:
+    """PLAY leftover tiled cameras × 1024 envs OOM A10 24GB at gym.make."""
+    scene = getattr(env_cfg, "scene", None)
+    for name in leftover_scene_camera_fields(scene):
+        print(f"[WARN] Clearing leftover scene.{name} (1024-env train camera OOM before W&B).")
+        setattr(scene, name, None)
+
+
+def _reassert_filter_collisions(env_cfg) -> None:
+    scene = getattr(env_cfg, "scene", None)
+    if not leftover_unfiltered_collisions(scene):
+        return
+    print("[WARN] Enabling leftover scene.filter_collisions (cloned 1024-env neighbor hits).")
+    scene.filter_collisions = True
+
+
+def _reassert_num_envs(env_cfg) -> None:
+    scene = getattr(env_cfg, "scene", None)
+    if not leftover_zero_num_envs(scene):
+        return
+    print("[WARN] Restoring leftover scene.num_envs=1024.")
+    scene.num_envs = 1024
+
+
+def _enable_spawn_collision(asset) -> None:
+    spawn = _asset_spawn(asset)
+    if spawn is None:
+        return
+    props = spawn.get("collision_props") if isinstance(spawn, dict) else getattr(spawn, "collision_props", None)
+    if isinstance(props, dict):
+        props["collision_enabled"] = True
+    elif props is not None and hasattr(props, "collision_enabled"):
+        props.collision_enabled = True
+    elif isinstance(spawn, dict):
+        spawn["collision_enabled"] = True
+    elif hasattr(spawn, "collision_enabled"):
+        spawn.collision_enabled = True
+
+
+def _reassert_robot_collision(env_cfg) -> None:
+    """Leftover visual-only robot (``collision_enabled=False``) falls through at reset."""
+    robot = getattr(getattr(env_cfg, "scene", None), "robot", None)
+    if not leftover_disabled_collision_asset(robot):
+        return
+    print("[WARN] Enabling leftover robot collision (visual-only robot falls through).")
+    _enable_spawn_collision(robot)
+
+
+def _reassert_missing_scene_entity_terms(env_cfg) -> None:
+    """Leftover reward/event/done terms still look up height_scanner after we null it."""
+    present = _scene_entity_names(env_cfg)
+    for group_name in ("rewards", "events", "terminations"):
+        group = getattr(env_cfg, group_name, None)
+        if group is None:
+            continue
+        for term_name in _public_field_names(group):
+            term = getattr(group, term_name, None)
+            if not leftover_missing_scene_entity_term(term, present):
+                continue
+            print(f"[WARN] Clearing leftover {group_name}.{term_name} (missing scene entity).")
+            setattr(group, term_name, None)
 
 
 def _reassert_stage_catcher(env_cfg) -> None:
@@ -2126,6 +2252,10 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
         )
         scene.height_scanner = None
 
+    _reassert_drop_scene_cameras(env_cfg)
+    _reassert_filter_collisions(env_cfg)
+    _reassert_num_envs(env_cfg)
+
     terrain = getattr(scene, "terrain", None) if scene is not None else None
     if terrain is not None:
         if getattr(terrain, "terrain_type", None) != "plane":
@@ -2173,6 +2303,7 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     _reassert_replicate_physics(env_cfg)
     _reassert_clone_prim_paths(env_cfg)
     _reassert_unitree_robot(env_cfg)
+    _reassert_robot_collision(env_cfg)
     _drop_leftover_actuators(env_cfg)
     _reassert_init_joint_state(env_cfg)
     _reassert_init_root_rot(env_cfg)
@@ -2181,6 +2312,7 @@ def reassert_gpu_env_cfg(env_cfg) -> None:
     _reassert_contact_sensors(env_cfg)
     _reassert_velocity_ranges(env_cfg)
     _reassert_anymal_body_names(env_cfg)
+    _reassert_missing_scene_entity_terms(env_cfg)
     _reassert_g1_action_joints(env_cfg)
     _reassert_g1_joint_fullmatch(env_cfg)
     _drop_h1_leftover_fingers(env_cfg)

@@ -151,6 +151,14 @@ if ! grep -q "def leftover_invalid_root_rot" "$REPO/scripts/rsl_rl/beamdojo_runt
   echo "beamdojo_runtime.py is missing leftover root quat restore. Pull ${REF} or rot=(0,0,0,0) NaNs PhysX at first reset." >&2
   exit 1
 fi
+if ! grep -q "def leftover_scene_camera_fields" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover PLAY camera drop. Pull ${REF} or tiled_camera × 1024 OOMs the A10 before W&B." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_unfiltered_collisions" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover filter_collisions restore. Pull ${REF} or 1024 clones collide at first reset." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_unusable_device" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover cuda:1 remap. Pull ${REF} or a multi-GPU dump opens cuda:1 on the A10." >&2
   exit 1
