@@ -758,6 +758,35 @@ class RunnerCfgSanitizeTests(unittest.TestCase):
         self.assertEqual(cfg["num_steps_per_env"], 24)
         self.assertEqual(cfg["save_interval"], 100)
 
+    def test_leftover_ppo_hparams_and_obs_normalization_are_restored(self):
+        cfg = {
+            "algorithm": {
+                "class_name": "PPODoubleCritic",
+                "learning_rate": None,
+                "gamma": 0,
+                "num_learning_epochs": -1,
+                "schedule": "linear",
+                "entropy_coef": 0.008,
+            },
+            "policy": {
+                "actor_obs_normalization": "false",
+                "critic_obs_normalization": {},
+            },
+        }
+        self.rt.sanitize_rsl_rl_train_cfg(cfg)
+        self.assertEqual(cfg["algorithm"]["learning_rate"], 3.0e-4)
+        self.assertEqual(cfg["algorithm"]["gamma"], 0.99)
+        self.assertEqual(cfg["algorithm"]["num_learning_epochs"], 5)
+        self.assertEqual(cfg["algorithm"]["schedule"], "adaptive")
+        self.assertEqual(cfg["algorithm"]["entropy_coef"], 0.008)
+        self.assertFalse(cfg["policy"]["actor_obs_normalization"])
+        self.assertFalse(cfg["policy"]["critic_obs_normalization"])
+        self.assertTrue(self.rt.leftover_invalid_ppo_float(None))
+        self.assertTrue(self.rt.leftover_invalid_ppo_schedule("linear"))
+        self.assertFalse(self.rt.leftover_invalid_ppo_float(3.0e-4))
+        self.assertFalse(self.rt.leftover_invalid_obs_normalization(False))
+        self.assertTrue(self.rt.leftover_invalid_obs_normalization("false"))
+
     def test_incomplete_symmetry_cfg_is_sanitized_to_none(self):
         cfg = {
             "algorithm": {
@@ -1950,6 +1979,7 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
             )
         )
         self.assertTrue(self.rt.leftover_contact_filter_prims(type("C", (), {"filter_prim_paths_expr": ["{ENV_REGEX_NS}/Terrain"]})()))
+        self.assertTrue(self.rt.leftover_contact_filter_prims(type("C", (), {"filter_prim_paths_expr": None})()))
         self.assertFalse(self.rt.leftover_contact_filter_prims(type("C", (), {"filter_prim_paths_expr": []})()))
         self.assertTrue(self.rt.leftover_wrong_contact_prim("{ENV_REGEX_NS}/Robot/base"))
         self.assertTrue(self.rt.leftover_wrong_contact_prim("{ENV_REGEX_NS}/Robot/LF_FOOT"))
@@ -2472,6 +2502,29 @@ class ReassertGpuEnvCfgTests(unittest.TestCase):
         self.assertEqual(joint_pos.joint_names, [".*"])
         self.assertEqual(gains.params["asset_cfg"].joint_names, [".*"])
         self.assertEqual(filter_cfg.scene.env_spacing, 8.0)
+
+        none_filter = type("C", (), {"filter_prim_paths_expr": None, "prim_path": "{ENV_REGEX_NS}/Robot/.*"})()
+        none_cfg = type(
+            "BeamDojoStage1EnvCfg",
+            (),
+            {
+                "scene": type(
+                    "Scene",
+                    (),
+                    {
+                        "height_scanner": None,
+                        "terrain": None,
+                        "catcher": None,
+                        "contact_forces": none_filter,
+                    },
+                )(),
+                "observations": None,
+                "commands": None,
+                "sim": None,
+            },
+        )()
+        self.rt.reassert_gpu_env_cfg(none_cfg)
+        self.assertEqual(none_filter.filter_prim_paths_expr, [])
 
         play_space = type(
             "BeamDojoStage1EnvCfg",
@@ -3082,6 +3135,10 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("def leftover_invalid_seed", runtime)
         self.assertIn("def leftover_invalid_num_rerenders", runtime)
         self.assertIn("def leftover_invalid_empirical_normalization", runtime)
+        self.assertIn("def leftover_invalid_obs_normalization", runtime)
+        self.assertIn("def leftover_invalid_ppo_float", runtime)
+        self.assertIn("def leftover_invalid_ppo_schedule", runtime)
+        self.assertIn("def _reassert_ppo_hparams", runtime)
         self.assertIn("def leftover_excess_obs_history", runtime)
         self.assertIn("def leftover_invalid_action_scale", runtime)
         self.assertIn("def leftover_missing_term_func", runtime)
@@ -3201,6 +3258,8 @@ class GymIdSourceTests(unittest.TestCase):
         self.assertIn("leftover_missing_viewer", relaunch)
         self.assertIn("leftover_invalid_seed", relaunch)
         self.assertIn("leftover_invalid_empirical_normalization", relaunch)
+        self.assertIn("leftover_invalid_ppo_float", relaunch)
+        self.assertIn("leftover_invalid_obs_normalization", relaunch)
         self.assertIn("leftover_excess_obs_history", relaunch)
         self.assertIn("leftover_invalid_action_scale", relaunch)
         self.assertIn("leftover_missing_term_func", relaunch)

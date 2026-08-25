@@ -239,6 +239,14 @@ if ! grep -q "def leftover_invalid_empirical_normalization" "$REPO/scripts/rsl_r
   echo "beamdojo_runtime.py is missing leftover empirical_normalization restore. Pull ${REF} or a leftover dict TypeErrors ActorCritic before W&B." >&2
   exit 1
 fi
+if ! grep -q "def leftover_invalid_ppo_float" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover PPO learning_rate restore. Pull ${REF} or Adam(lr=None) TypeErrors before wandb.init." >&2
+  exit 1
+fi
+if ! grep -q "def leftover_invalid_obs_normalization" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
+  echo "beamdojo_runtime.py is missing leftover actor_obs_normalization restore. Pull ${REF} or a leftover string enables EmpiricalNormalization." >&2
+  exit 1
+fi
 if ! grep -q "def leftover_excess_obs_history" "$REPO/scripts/rsl_rl/beamdojo_runtime.py"; then
   echo "beamdojo_runtime.py is missing leftover obs-history clamp. Pull ${REF} or leftover RNN history_length OOMs 1024 envs at gym.make." >&2
   exit 1

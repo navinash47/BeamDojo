@@ -1284,7 +1284,7 @@ def leftover_invalid_env_spacing(scene) -> bool:
 
 
 def leftover_contact_filter_prims(contact) -> bool:
-    """ANYmal/Cassie leftover filters die at gym.make (PhysX count / one-to-many)."""
+    """ANYmal leftover filters, or ``None``, die at ContactSensor ``len(expr)`` / gym.make."""
     if contact is None:
         return False
     expr = (
@@ -1292,6 +1292,8 @@ def leftover_contact_filter_prims(contact) -> bool:
         if isinstance(contact, dict)
         else getattr(contact, "filter_prim_paths_expr", None)
     )
+    if expr is None:
+        return True
     return any(str(item).strip() for item in names_as_list(expr))
 
 
@@ -1573,10 +1575,84 @@ def leftover_invalid_empirical_normalization(value) -> bool:
     return not isinstance(value, bool)
 
 
+def leftover_invalid_obs_normalization(value) -> bool:
+    """ActorCritic treats a leftover string ``'false'`` as truthy and builds EmpiricalNormalization."""
+    if value is None:
+        return False
+    return not isinstance(value, bool)
+
+
+def leftover_invalid_ppo_float(value) -> bool:
+    """PPO.__init__ does ``Adam(..., lr=learning_rate)`` before wandb.init. Leftover None TypeErrors."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return True
+    return number != number or number <= 0.0
+
+
+def leftover_invalid_ppo_int(value) -> bool:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return True
+    return number < 1
+
+
+def leftover_invalid_ppo_schedule(value) -> bool:
+    if not isinstance(value, str):
+        return True
+    return value.strip().lower() not in {"adaptive", "fixed"}
+
+
+PPO_FLOAT_DEFAULTS = {
+    "learning_rate": 3.0e-4,
+    "clip_param": 0.2,
+    "gamma": 0.99,
+    "lam": 0.95,
+    "entropy_coef": 0.02,
+    "value_loss_coef": 1.0,
+    "max_grad_norm": 1.0,
+    "desired_kl": 0.01,
+}
+PPO_INT_DEFAULTS = {
+    "num_learning_epochs": 5,
+    "num_mini_batches": 4,
+}
+
+
 def _reassert_empirical_normalization(train_cfg: dict) -> None:
     if leftover_invalid_empirical_normalization(train_cfg.get("empirical_normalization")):
         print("[WARN] Restoring leftover empirical_normalization=False (ActorCritic at runner init).")
         train_cfg["empirical_normalization"] = False
+
+
+def _reassert_obs_normalization(train_cfg: dict) -> None:
+    policy = train_cfg.get("policy")
+    if not isinstance(policy, dict):
+        return
+    for key in ("actor_obs_normalization", "critic_obs_normalization"):
+        if leftover_invalid_obs_normalization(policy.get(key)):
+            print(f"[WARN] Restoring leftover policy.{key} to False.")
+            policy[key] = False
+
+
+def _reassert_ppo_hparams(train_cfg: dict) -> None:
+    """Leftover ``learning_rate=None`` TypeErrors Adam in PPO.__init__ — before wandb.init."""
+    algorithm = train_cfg.get("algorithm")
+    if not isinstance(algorithm, dict) or algorithm.get("class_name") == "Distillation":
+        return
+    for key, default in PPO_FLOAT_DEFAULTS.items():
+        if leftover_invalid_ppo_float(algorithm.get(key)):
+            print(f"[WARN] Restoring leftover algorithm.{key}={algorithm.get(key)!r} to {default}.")
+            algorithm[key] = default
+    for key, default in PPO_INT_DEFAULTS.items():
+        if leftover_invalid_ppo_int(algorithm.get(key)):
+            print(f"[WARN] Restoring leftover algorithm.{key}={algorithm.get(key)!r} to {default}.")
+            algorithm[key] = default
+    if leftover_invalid_ppo_schedule(algorithm.get("schedule")):
+        print(f"[WARN] Restoring leftover algorithm.schedule={algorithm.get('schedule')!r} to 'adaptive'.")
+        algorithm["schedule"] = "adaptive"
 
 
 def leftover_cpu_device(value) -> bool:
@@ -1761,6 +1837,8 @@ def sanitize_rsl_rl_train_cfg(train_cfg: dict) -> dict:
     _reassert_init_noise_std(train_cfg)
     _reassert_logger(train_cfg)
     _reassert_empirical_normalization(train_cfg)
+    _reassert_obs_normalization(train_cfg)
+    _reassert_ppo_hparams(train_cfg)
     if "clip_actions" in train_cfg:
         train_cfg["clip_actions"] = sanitize_clip_actions(train_cfg.get("clip_actions"))
     return train_cfg
